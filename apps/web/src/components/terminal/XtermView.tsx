@@ -7,6 +7,7 @@ import { isInputEventLoggingEnabled, logInputEvent } from '../../debug/input-eve
 import { terminalSocket } from '../../ws/terminal-socket.js'
 import { useThemeStore } from '../../stores/theme.store.js'
 import { openTerminalWebUrl } from './terminal-links.js'
+import { getCommittedImeInputText } from './ime-input.js'
 import {
   createVoiceInputState,
   getVoiceCommitText,
@@ -131,14 +132,6 @@ function getComposedText(textarea: HTMLTextAreaElement, startValue: string, fall
   }
 
   return fallback
-}
-
-function isCommittedImeInput(event: InputEvent): boolean {
-  return (
-    event.inputType === 'insertText' ||
-    event.inputType === 'insertFromComposition' ||
-    (event.inputType !== 'insertCompositionText' && event.isComposing === false)
-  )
 }
 
 function containsCommittedCjkText(data: string): boolean {
@@ -1304,13 +1297,10 @@ export function XtermView({
         inputEvent.data || compositionTextRef.current
       )
 
-      if (isCommittedImeInput(inputEvent)) {
-        sendCommittedImeText(compositionTextRef.current)
+      const committedText = getCommittedImeInputText(inputEvent, compositionTextRef.current)
+      if (committedText) {
+        sendCommittedImeText(committedText)
         return
-      }
-
-      if (!isVoiceCaptureActive() && containsCommittedCjkText(compositionTextRef.current)) {
-        sendCommittedImeText(compositionTextRef.current)
       }
     }
 

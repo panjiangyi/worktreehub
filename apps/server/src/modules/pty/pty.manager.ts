@@ -21,6 +21,29 @@ export function stripTerminalQuerySequences(data: string): string {
   return data.replace(DEVICE_ATTRIBUTE_SEQUENCE_PATTERN, '').replace(OSC_COLOR_RESPONSE_PATTERN, '')
 }
 
+export function buildInteractivePtyEnv(
+  inheritedEnv: NodeJS.ProcessEnv,
+  inputEnv: Record<string, string>,
+  launchEnv: Record<string, string>,
+  terminalId: string
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...inheritedEnv,
+    ...inputEnv,
+    ...launchEnv,
+    TERM: 'xterm-256color',
+    COLORTERM: 'truecolor',
+    WORKTREEHUB: '1',
+    WORKTREEHUB_TERMINAL_ID: terminalId,
+  }
+
+  // NO_COLOR belongs to the process that launched WorktreeHub, not to the
+  // interactive terminal it hosts. Presence alone disables colors in many
+  // CLIs, even though this PTY advertises full color support.
+  delete env.NO_COLOR
+  return env
+}
+
 export type PtyManager = ReturnType<typeof createPtyManager>
 
 export function createPtyManager() {
@@ -46,15 +69,7 @@ export function createPtyManager() {
         cols: input.cols,
         rows: input.rows,
         cwd: input.cwd,
-        env: {
-          ...process.env,
-          ...input.env,
-          ...launchConfig.env,
-          TERM: 'xterm-256color',
-          COLORTERM: 'truecolor',
-          WORKTREEHUB: '1',
-          WORKTREEHUB_TERMINAL_ID: input.terminalId,
-        },
+        env: buildInteractivePtyEnv(process.env, input.env, launchConfig.env, input.terminalId),
       })
 
       const outputBuffer = new OutputReplayBuffer(OUTPUT_REPLAY_BUFFER_BYTES)

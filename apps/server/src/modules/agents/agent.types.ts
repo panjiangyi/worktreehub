@@ -13,6 +13,7 @@ export type AgentRunInput = {
   prompt: string
   providerSessionId: string | null
   imagePaths: string[]
+  approvalMode: 'ask' | 'auto'
   signal: AbortSignal
   onEvent: (event: AgentEvent) => void | Promise<void>
 }

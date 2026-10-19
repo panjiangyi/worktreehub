@@ -1,5 +1,27 @@
 import { describe, expect, it } from 'vitest'
-import { stripTerminalQuerySequences } from './pty.manager.js'
+import { buildInteractivePtyEnv, stripTerminalQuerySequences } from './pty.manager.js'
+
+describe('buildInteractivePtyEnv', () => {
+  it('does not leak NO_COLOR from the server into interactive terminals', () => {
+    const env = buildInteractivePtyEnv(
+      { PATH: '/usr/bin', NO_COLOR: '1' },
+      { WORKTREEHUB_PROJECT_ID: 'project-1', NO_COLOR: '1' },
+      { PROMPT_DIRTRIM: '1', NO_COLOR: '1' },
+      'terminal-1'
+    )
+
+    expect(env).not.toHaveProperty('NO_COLOR')
+    expect(env).toMatchObject({
+      PATH: '/usr/bin',
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+      WORKTREEHUB: '1',
+      WORKTREEHUB_TERMINAL_ID: 'terminal-1',
+      WORKTREEHUB_PROJECT_ID: 'project-1',
+      PROMPT_DIRTRIM: '1',
+    })
+  })
+})
 
 describe('stripTerminalQuerySequences', () => {
   it('removes device attribute queries from replay output', () => {

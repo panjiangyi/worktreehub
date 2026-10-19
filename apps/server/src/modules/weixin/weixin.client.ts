@@ -58,8 +58,8 @@ export class WeixinClient {
     }
   }
 
-  async messages(since: number, limit = 200): Promise<{ messages: WeixinMessage[]; next_cursor: number; has_more: boolean }> {
-    const response = await this.request(this.accountPath(`/messages?since=${since}&limit=${limit}`))
+  async messages(since: number, limit = 200, signal?: AbortSignal): Promise<{ messages: WeixinMessage[]; next_cursor: number; has_more: boolean }> {
+    const response = await this.request(this.accountPath(`/messages?since=${since}&limit=${limit}`), { signal })
     return await response.json() as { messages: WeixinMessage[]; next_cursor: number; has_more: boolean }
   }
 

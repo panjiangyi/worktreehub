@@ -196,6 +196,7 @@ export type WeixinIntegrationStatus = {
   activeProjectId: string | null
   activeWorktreeId: string | null
   activeAgentId: string
+  approvalMode: 'ask' | 'auto'
   agents: AgentDefinition[]
   currentTask: CodingTaskSummary | null
   lastError: string | null

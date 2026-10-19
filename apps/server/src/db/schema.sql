@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS coding_tasks (
   session_id TEXT NOT NULL,
   source_message_seq INTEGER,
   prompt TEXT NOT NULL,
+  image_paths_json TEXT NOT NULL DEFAULT '[]',
   status TEXT NOT NULL,
   summary TEXT,
   detail TEXT,
@@ -111,6 +112,24 @@ CREATE TABLE IF NOT EXISTS coding_tasks (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (session_id) REFERENCES coding_sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS weixin_task_interactions (
+  id TEXT PRIMARY KEY,
+  binding_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  worktree_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  agent_interaction_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  answer TEXT,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  resolved_at TEXT,
+  FOREIGN KEY (binding_id) REFERENCES weixin_bindings(id) ON DELETE CASCADE,
+  FOREIGN KEY (task_id) REFERENCES coding_tasks(id) ON DELETE CASCADE,
+  FOREIGN KEY (worktree_id) REFERENCES worktrees(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS weixin_pending_interactions (

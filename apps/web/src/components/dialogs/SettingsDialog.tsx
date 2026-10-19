@@ -143,6 +143,7 @@ export function SettingsDialog() {
                 <div className="flex items-center justify-between"><span>Sidecar</span><span className={weixin.connected ? 'app-success' : 'app-danger'}>{weixin.connected ? 'Connected' : 'Unavailable'}</span></div>
                 <div className="flex items-center justify-between gap-3"><span>Account</span><span className="truncate app-muted">{weixin.accountLabel || weixin.accountId || 'Not configured'}</span></div>
                 <div className="flex items-center justify-between gap-3"><span>Owner</span><span className="truncate app-muted">{weixin.owner?.displayName || weixin.owner?.userId || 'Not paired'}</span></div>
+                <div className="flex items-center justify-between"><span>Approvals</span><span className={weixin.approvalMode === 'auto' ? 'app-danger' : 'app-muted'}>{weixin.approvalMode === 'auto' ? 'Auto approve' : 'Ask in WeChat'}</span></div>
                 {weixin.currentTask && <div className="flex items-center justify-between"><span>Current task</span><span className="app-muted">{weixin.currentTask.id.slice(-6)} · {weixin.currentTask.status}</span></div>}
               </div>
             )}

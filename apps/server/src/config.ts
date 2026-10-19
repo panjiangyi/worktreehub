@@ -35,6 +35,7 @@ export type AppConfig = {
     pollIntervalMs: number
     mediaMaxBytes: number
     mediaRetentionMs: number
+    approvalMode: 'ask' | 'auto'
   }
 }
 
@@ -95,6 +96,7 @@ export function getConfig(): AppConfig {
       pollIntervalMs: Number(process.env.WORKTREEHUB_WEIXIN_POLL_INTERVAL_MS ?? 2000),
       mediaMaxBytes: Number(process.env.WORKTREEHUB_WEIXIN_MEDIA_MAX_BYTES ?? 20 * 1024 * 1024),
       mediaRetentionMs: Number(process.env.WORKTREEHUB_WEIXIN_MEDIA_RETENTION_MS ?? 7 * 24 * 60 * 60 * 1000),
+      approvalMode: process.env.WORKTREEHUB_WEIXIN_APPROVAL_MODE === 'auto' ? 'auto' : 'ask',
     },
   }
 }

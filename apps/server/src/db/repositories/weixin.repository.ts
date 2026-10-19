@@ -29,6 +29,7 @@ export type CodingTaskRecord = {
   sessionId: string
   sourceMessageSeq: number | null
   prompt: string
+  imagePaths: string[]
   status: CodingTaskStatus
   summary: string | null
   detail: string | null
@@ -39,12 +40,34 @@ export type CodingTaskRecord = {
   updatedAt: string
 }
 
+export type RunnableCodingTask = CodingTaskRecord & {
+  bindingId: string
+  worktreeId: string
+  agentId: string
+  userId: string
+}
+
 export type PendingInteraction = {
   bindingId: string
   kind: string
   payload: Record<string, unknown>
   expiresAt: string
   createdAt: string
+}
+
+export type TaskInteraction = {
+  id: string
+  bindingId: string
+  taskId: string
+  worktreeId: string
+  kind: 'question' | 'approval'
+  agentInteractionId: string
+  payload: Record<string, unknown>
+  status: 'pending' | 'resolved' | 'cancelled' | 'expired'
+  answer: string | null
+  expiresAt: string
+  createdAt: string
+  resolvedAt: string | null
 }
 
 type BindingRow = {
@@ -58,6 +81,7 @@ type SessionRow = {
 }
 type TaskRow = {
   id: string; session_id: string; source_message_seq: number | null; prompt: string
+  image_paths_json: string
   status: CodingTaskStatus; summary: string | null; detail: string | null; error: string | null
   started_at: string | null; completed_at: string | null; created_at: string; updated_at: string
 }
@@ -73,8 +97,21 @@ const sessionFromRow = (r: SessionRow): CodingSessionRecord => ({
 })
 const taskFromRow = (r: TaskRow): CodingTaskRecord => ({
   id: r.id, sessionId: r.session_id, sourceMessageSeq: r.source_message_seq, prompt: r.prompt,
+  imagePaths: JSON.parse(r.image_paths_json) as string[],
   status: r.status, summary: r.summary, detail: r.detail, error: r.error,
   startedAt: r.started_at, completedAt: r.completed_at, createdAt: r.created_at, updatedAt: r.updated_at,
+})
+
+type TaskInteractionRow = {
+  id: string; binding_id: string; task_id: string; worktree_id: string; kind: 'question' | 'approval'
+  agent_interaction_id: string; payload_json: string; status: TaskInteraction['status']; answer: string | null
+  expires_at: string; created_at: string; resolved_at: string | null
+}
+
+const taskInteractionFromRow = (r: TaskInteractionRow): TaskInteraction => ({
+  id: r.id, bindingId: r.binding_id, taskId: r.task_id, worktreeId: r.worktree_id, kind: r.kind,
+  agentInteractionId: r.agent_interaction_id, payload: JSON.parse(r.payload_json) as Record<string, unknown>,
+  status: r.status, answer: r.answer, expiresAt: r.expires_at, createdAt: r.created_at, resolvedAt: r.resolved_at,
 })
 
 export function createWeixinRepository(db: Database.Database) {
@@ -128,6 +165,9 @@ export function createWeixinRepository(db: Database.Database) {
     markProcessed(accountId: string, seq: number): boolean {
       return db.prepare('INSERT OR IGNORE INTO weixin_processed_messages(account_id,seq,processed_at) VALUES(?,?,?)').run(accountId, seq, now()).changes > 0
     },
+    isProcessed(accountId: string, seq: number): boolean {
+      return Boolean(db.prepare('SELECT 1 FROM weixin_processed_messages WHERE account_id=? AND seq=?').get(accountId, seq))
+    },
     listAgents(): AgentDefinition[] {
       const rows = db.prepare('SELECT * FROM agent_definitions ORDER BY kind DESC, name').all() as Array<{
         id: string; name: string; kind: 'builtin' | 'command'; executable: string; config_json: string; enabled: number
@@ -167,9 +207,11 @@ export function createWeixinRepository(db: Database.Database) {
     resetSession(bindingId: string, worktreeId: string, agentId: string): void {
       db.prepare('DELETE FROM coding_sessions WHERE binding_id=? AND worktree_id=? AND agent_id=?').run(bindingId, worktreeId, agentId)
     },
-    insertTask(task: CodingTaskRecord): void {
-      db.prepare(`INSERT INTO coding_tasks(id,session_id,source_message_seq,prompt,status,summary,detail,error,started_at,completed_at,created_at,updated_at)
-        VALUES(@id,@sessionId,@sourceMessageSeq,@prompt,@status,@summary,@detail,@error,@startedAt,@completedAt,@createdAt,@updatedAt)`).run(task)
+    insertTask(task: CodingTaskRecord): boolean {
+      return db.prepare(`INSERT OR IGNORE INTO coding_tasks(id,session_id,source_message_seq,prompt,image_paths_json,status,summary,detail,error,started_at,completed_at,created_at,updated_at)
+        VALUES(@id,@sessionId,@sourceMessageSeq,@prompt,@imagePathsJson,@status,@summary,@detail,@error,@startedAt,@completedAt,@createdAt,@updatedAt)`).run({
+          ...task, imagePathsJson: JSON.stringify(task.imagePaths),
+        }).changes > 0
     },
     updateTask(id: string, input: Partial<Pick<CodingTaskRecord, 'status' | 'summary' | 'detail' | 'error' | 'startedAt' | 'completedAt'>>): void {
       const row = db.prepare('SELECT * FROM coding_tasks WHERE id=?').get(id) as TaskRow | undefined
@@ -192,6 +234,93 @@ export function createWeixinRepository(db: Database.Database) {
       const row = db.prepare(`SELECT t.*,s.worktree_id,s.agent_id FROM coding_tasks t JOIN coding_sessions s ON s.id=t.session_id
         WHERE t.status IN ('queued','running','waiting') ORDER BY t.created_at LIMIT 1`).get() as (TaskRow & { worktree_id: string; agent_id: string }) | undefined
       return row ? { ...taskFromRow(row), worktreeId: row.worktree_id, agentId: row.agent_id } : null
+    },
+    listQueuedWorktreeIds(): string[] {
+      const rows = db.prepare(`SELECT DISTINCT s.worktree_id FROM coding_tasks t
+        JOIN coding_sessions s ON s.id=t.session_id WHERE t.status='queued' ORDER BY t.created_at`).all() as Array<{ worktree_id: string }>
+      return rows.map((row) => row.worktree_id)
+    },
+    claimNextQueuedTask(worktreeId: string): RunnableCodingTask | null {
+      return db.transaction(() => {
+        const row = db.prepare(`SELECT t.*,s.binding_id,s.worktree_id,s.agent_id,b.user_id FROM coding_tasks t
+          JOIN coding_sessions s ON s.id=t.session_id
+          JOIN weixin_bindings b ON b.id=s.binding_id
+          WHERE s.worktree_id=? AND t.status='queued' ORDER BY t.created_at LIMIT 1`).get(worktreeId) as
+          (TaskRow & { binding_id: string; worktree_id: string; agent_id: string; user_id: string }) | undefined
+        if (!row) return null
+        const startedAt = now()
+        const claimed = db.prepare(`UPDATE coding_tasks SET status='running',started_at=?,updated_at=? WHERE id=? AND status='queued'`)
+          .run(startedAt, startedAt, row.id)
+        if (!claimed.changes) return null
+        return { ...taskFromRow({ ...row, status: 'running', started_at: startedAt, updated_at: startedAt }),
+          bindingId: row.binding_id, worktreeId: row.worktree_id, agentId: row.agent_id, userId: row.user_id }
+      })()
+    },
+    recoverInterruptedTasks(): RunnableCodingTask[] {
+      return db.transaction(() => {
+        const rows = db.prepare(`SELECT t.*,s.binding_id,s.worktree_id,s.agent_id,b.user_id FROM coding_tasks t
+          JOIN coding_sessions s ON s.id=t.session_id
+          JOIN weixin_bindings b ON b.id=s.binding_id
+          WHERE t.status IN ('running','waiting') ORDER BY t.created_at`).all() as Array<
+            TaskRow & { binding_id: string; worktree_id: string; agent_id: string; user_id: string }
+          >
+        if (!rows.length) return []
+        const timestamp = now()
+        const failTask = db.prepare(`UPDATE coding_tasks SET status='failed',error=?,completed_at=?,updated_at=? WHERE id=?`)
+        const readySession = db.prepare("UPDATE coding_sessions SET status='ready',updated_at=? WHERE id=?")
+        const cancelInteractions = db.prepare(`UPDATE weixin_task_interactions SET status='cancelled',resolved_at=?
+          WHERE task_id=? AND status='pending'`)
+        for (const row of rows) {
+          failTask.run('WorktreeHub restarted while this task was running. Please resend the task to retry safely.', timestamp, timestamp, row.id)
+          readySession.run(timestamp, row.session_id)
+          cancelInteractions.run(timestamp, row.id)
+        }
+        return rows.map((row) => ({ ...taskFromRow(row), bindingId: row.binding_id, worktreeId: row.worktree_id,
+          agentId: row.agent_id, userId: row.user_id }))
+      })()
+    },
+    setTaskInteraction(input: Omit<TaskInteraction, 'status' | 'answer' | 'expiresAt' | 'createdAt' | 'resolvedAt'>,
+      ttlMs = 10 * 60_000): TaskInteraction {
+      return db.transaction(() => {
+        const createdAt = now()
+        const expiresAt = new Date(Date.now() + ttlMs).toISOString()
+        db.prepare(`UPDATE weixin_task_interactions SET status='cancelled',resolved_at=? WHERE task_id=? AND status='pending'`)
+          .run(createdAt, input.taskId)
+        db.prepare(`INSERT INTO weixin_task_interactions
+          (id,binding_id,task_id,worktree_id,kind,agent_interaction_id,payload_json,status,answer,expires_at,created_at,resolved_at)
+          VALUES(@id,@bindingId,@taskId,@worktreeId,@kind,@agentInteractionId,@payload,'pending',NULL,@expiresAt,@createdAt,NULL)`).run({
+            ...input, payload: JSON.stringify(input.payload), expiresAt, createdAt,
+          })
+        return { ...input, status: 'pending' as const, answer: null, expiresAt, createdAt, resolvedAt: null }
+      })()
+    },
+    listPendingTaskInteractions(bindingId: string): TaskInteraction[] {
+      const timestamp = now()
+      const rows = db.prepare(`SELECT * FROM weixin_task_interactions WHERE binding_id=? AND status='pending'
+        AND expires_at>? ORDER BY created_at`).all(bindingId, timestamp) as TaskInteractionRow[]
+      return rows.map(taskInteractionFromRow)
+    },
+    expireTaskInteractions(): TaskInteraction[] {
+      return db.transaction(() => {
+        const timestamp = now()
+        const rows = db.prepare(`SELECT * FROM weixin_task_interactions WHERE status='pending' AND expires_at<=?`)
+          .all(timestamp) as TaskInteractionRow[]
+        if (rows.length) {
+          db.prepare(`UPDATE weixin_task_interactions SET status='expired',resolved_at=?
+            WHERE status='pending' AND expires_at<=?`).run(timestamp, timestamp)
+        }
+        return rows.map((row) => taskInteractionFromRow({ ...row, status: 'expired', resolved_at: timestamp }))
+      })()
+    },
+    resolveTaskInteraction(id: string, answer: string): boolean {
+      const timestamp = now()
+      return db.prepare(`UPDATE weixin_task_interactions SET status='resolved',answer=?,resolved_at=?
+        WHERE id=? AND status='pending'`).run(answer, timestamp, id).changes > 0
+    },
+    closeTaskInteractions(taskId: string): void {
+      const timestamp = now()
+      db.prepare(`UPDATE weixin_task_interactions SET status='cancelled',resolved_at=?
+        WHERE task_id=? AND status='pending'`).run(timestamp, taskId)
     },
     setPending(bindingId: string, kind: string, payload: Record<string, unknown>, ttlMs = 10 * 60_000): void {
       const createdAt = now(); const expiresAt = new Date(Date.now() + ttlMs).toISOString()
@@ -226,6 +355,11 @@ export function createWeixinRepository(db: Database.Database) {
     },
     markOutboxSent(id: string): void { db.prepare("UPDATE weixin_outbox SET status='sent',sent_at=? WHERE id=?").run(now(), id) },
     markOutboxFailed(id: string, attempts: number, error: string): void {
+      if (attempts >= 10) {
+        db.prepare("UPDATE weixin_outbox SET status='failed',attempts=?,last_error=? WHERE id=?")
+          .run(attempts, error.slice(0, 1000), id)
+        return
+      }
       const delay = Math.min(60_000, 1000 * 2 ** Math.min(attempts, 6))
       db.prepare("UPDATE weixin_outbox SET status='pending',attempts=?,last_error=?,next_attempt_at=? WHERE id=?")
         .run(attempts, error.slice(0, 1000), new Date(Date.now() + delay).toISOString(), id)

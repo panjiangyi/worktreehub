@@ -1,4 +1,5 @@
 import { Menu, PanelLeftClose, PanelLeftOpen, Terminal, Plus, RefreshCw, Settings, FolderOpen, LogOut, WifiOff } from 'lucide-react'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { useAuthStore } from '../../stores/auth.store.js'
 import { useLayoutStore } from '../../stores/layout.store.js'
 import { useUiStore } from '../../stores/ui.store.js'
@@ -40,7 +41,8 @@ export function Header() {
   const worktreesByProjectId = useProjectStore((s) => s.worktreesByProjectId)
   const refreshProject = useProjectStore((s) => s.refreshProject)
 
-  const runningCount = terminals.filter((t) => t.status === 'running').length
+  const runningTerminals = terminals.filter((t) => t.status === 'running')
+  const runningCount = runningTerminals.length
   const activeTerminal = activeScopeId
     ? terminals.find((terminal) => terminal.scopeId === activeScopeId) ?? null
     : null
@@ -156,11 +158,61 @@ export function Header() {
 
       <div className="hidden md:block flex-1" />
 
-      <div className="hidden md:flex items-center gap-1.5 text-xs md:text-sm app-muted">
-        <Terminal className="w-4 h-4" />
-        <span className="hidden sm:inline">Running: </span>
-        <span>{runningCount}</span>
-      </div>
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger asChild>
+          <button
+            className="app-icon-button flex items-center gap-1.5 px-2 py-1.5 text-xs md:text-sm"
+            aria-label={`Show running terminals (${runningCount})`}
+            title="Show running terminals"
+          >
+            <Terminal className="w-4 h-4" />
+            <span className="hidden md:inline">Running:</span>
+            <span>{runningCount}</span>
+          </button>
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content
+            align="end"
+            sideOffset={8}
+            collisionPadding={12}
+            className="app-panel z-50 w-96 max-w-[calc(100vw-24px)] rounded-lg border p-1 shadow-xl overflow-y-auto max-h-[min(70vh,var(--radix-dropdown-menu-content-available-height))]"
+          >
+            <DropdownMenu.Label className="px-3 py-2 text-sm font-medium">
+              Running terminals ({runningCount})
+            </DropdownMenu.Label>
+            {runningCount === 0 && (
+              <div className="px-3 py-4 text-sm app-muted">No running terminals</div>
+            )}
+            {runningTerminals.map((terminal) => {
+              const project = projects.find((item) => item.id === terminal.projectId)
+              const worktree = terminal.projectId
+                ? (worktreesByProjectId[terminal.projectId] ?? []).find((item) => item.id === terminal.worktreeId)
+                : null
+              const scopeLabel = [project?.name, worktree?.displayName || worktree?.name || terminal.scopeLabel]
+                .filter(Boolean).join(' / ')
+
+              return (
+                <DropdownMenu.Item
+                  key={terminal.id}
+                  textValue={`${terminal.title} ${scopeLabel} ${terminal.cwd}`}
+                  onSelect={() => {
+                    useTerminalStore.getState().setActiveScope(terminal.scopeId)
+                    useLayoutStore.getState().addPaneForTerminal(terminal.scopeId, terminal.id, terminal.title)
+                  }}
+                  className="app-hover flex cursor-pointer items-start gap-2 rounded px-3 py-2 outline-none data-[highlighted]:bg-[var(--color-panel-hover)]"
+                >
+                  <Terminal className="app-success mt-0.5 h-4 w-4 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium">{terminal.title}</div>
+                    <div className="truncate text-xs app-muted">{scopeLabel}</div>
+                    <div className="truncate text-xs app-subtle" title={terminal.cwd}>{terminal.cwd}</div>
+                  </div>
+                </DropdownMenu.Item>
+              )
+            })}
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>
 
       <button
         onClick={() => openDialog('openDirectoryTerminal')}

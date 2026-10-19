@@ -23,6 +23,11 @@ function ensureIndexes(db: Database.Database): void {
   db.exec('CREATE INDEX IF NOT EXISTS idx_terminal_sessions_status ON terminal_sessions(status)')
   db.exec('CREATE INDEX IF NOT EXISTS idx_coding_tasks_status ON coding_tasks(status)')
   db.exec('CREATE INDEX IF NOT EXISTS idx_coding_tasks_session ON coding_tasks(session_id, created_at)')
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_coding_tasks_source_message
+    ON coding_tasks(session_id, source_message_seq) WHERE source_message_seq IS NOT NULL`)
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_weixin_task_interactions_pending
+    ON weixin_task_interactions(task_id) WHERE status='pending'`)
+  db.exec('CREATE INDEX IF NOT EXISTS idx_weixin_task_interactions_binding ON weixin_task_interactions(binding_id, status, created_at)')
   db.exec('CREATE INDEX IF NOT EXISTS idx_weixin_outbox_pending ON weixin_outbox(status, next_attempt_at)')
 }
 
@@ -166,6 +171,11 @@ function runMigrations(db: Database.Database): void {
   }
   if (!worktreeCols.has('is_archived')) {
     db.exec('ALTER TABLE worktrees ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0')
+  }
+
+  const codingTaskCols = getColumnNames(db, 'coding_tasks')
+  if (!codingTaskCols.has('image_paths_json')) {
+    db.exec("ALTER TABLE coding_tasks ADD COLUMN image_paths_json TEXT NOT NULL DEFAULT '[]'")
   }
 
   migrateTerminalSessionsToScopedModel(db)

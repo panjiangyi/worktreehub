@@ -152,7 +152,7 @@ export async function buildApp(config: AppConfig) {
 
   weixinService.start()
   app.addHook('onClose', async () => {
-    weixinService.stop()
+    await weixinService.stop()
     db.close()
   })
 

@@ -39,6 +39,7 @@ function createConfig(rootPath: string): AppConfig {
       pollIntervalMs: 2000,
       mediaMaxBytes: 20 * 1024 * 1024,
       mediaRetentionMs: 7 * 24 * 60 * 60 * 1000,
+      approvalMode: 'ask',
     },
   }
 }

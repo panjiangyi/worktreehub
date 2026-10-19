@@ -4,7 +4,7 @@ import type { AgentDefinition } from '@worktreehub/shared'
 import type { AgentRunInput, AgentRunResult, CodingAgentDriver } from './agent.types.js'
 
 type RpcMessage = { id?: string | number; method?: string; params?: Record<string, unknown>; result?: unknown; error?: { message?: string } }
-type PendingRpc = { resolve: (value: unknown) => void; reject: (error: Error) => void }
+type PendingRpc = { resolve: (value: unknown) => void; reject: (error: Error) => void; timeout: NodeJS.Timeout }
 type PendingInteraction = { rpcId: string | number; kind: 'approval' | 'question'; questionIds?: string[] }
 
 export class CodexAppServerDriver implements CodingAgentDriver {
@@ -40,8 +40,20 @@ export class CodexAppServerDriver implements CodingAgentDriver {
 
   private request(method: string, params: Record<string, unknown>): Promise<unknown> {
     const id = ++this.rpcId
-    this.send({ id, method, params })
-    return new Promise((resolve, reject) => this.rpc.set(id, { resolve, reject }))
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.rpc.delete(id)
+        reject(new Error(`Codex RPC timed out: ${method}`))
+      }, 30_000)
+      this.rpc.set(id, { resolve, reject, timeout })
+      try {
+        this.send({ id, method, params })
+      } catch (error) {
+        clearTimeout(timeout)
+        this.rpc.delete(id)
+        reject(error)
+      }
+    })
   }
 
   resolveInteraction(id: string, answer: string): void {
@@ -68,14 +80,20 @@ export class CodexAppServerDriver implements CodingAgentDriver {
     let finalMessage = ''
     let threadId = input.providerSessionId
     let turnId: string | null = null
+    let settled = false
     let complete!: (value: AgentRunResult) => void
     let fail!: (error: Error) => void
-    const completion = new Promise<AgentRunResult>((resolve, reject) => { complete = resolve; fail = reject })
+    const completion = new Promise<AgentRunResult>((resolve, reject) => {
+      complete = (result) => { if (!settled) { settled = true; resolve(result) } }
+      fail = (error) => { if (!settled) { settled = true; reject(error) } }
+    })
 
     child.stderr.on('data', (chunk) => { stderr += String(chunk) })
     child.once('error', fail)
     child.once('exit', (code) => {
-      if (code && code !== 0) fail(new Error(`Codex app-server exited ${code}: ${stderr.slice(-1000)}`))
+      if (!settled) fail(new Error(code && code !== 0
+        ? `Codex app-server exited ${code}: ${stderr.slice(-1000)}`
+        : 'Codex app-server exited before the turn completed'))
     })
 
     const lines = createInterface({ input: child.stdout })
@@ -87,6 +105,7 @@ export class CodexAppServerDriver implements CodingAgentDriver {
         const pending = this.rpc.get(message.id)
         if (pending) {
           this.rpc.delete(message.id)
+          clearTimeout(pending.timeout)
           if (message.error) pending.reject(new Error(message.error.message ?? 'Codex RPC failed'))
           else pending.resolve(message.result)
         }
@@ -95,6 +114,10 @@ export class CodexAppServerDriver implements CodingAgentDriver {
       if (message.id !== undefined && message.method) {
         const params = message.params ?? {}
         if (message.method === 'item/commandExecution/requestApproval' || message.method === 'item/fileChange/requestApproval') {
+          if (input.approvalMode === 'auto') {
+            this.send({ id: message.id, result: { decision: 'accept' } })
+            return
+          }
           const interactionId = `approval_${String(message.id)}`
           this.interactions.set(interactionId, { rpcId: message.id, kind: 'approval' })
           const command = typeof params.command === 'string' ? `\n命令：${params.command}` : ''
@@ -164,7 +187,10 @@ export class CodexAppServerDriver implements CodingAgentDriver {
       return await completion
     } finally {
       input.signal.removeEventListener('abort', abort)
-      for (const pending of this.rpc.values()) pending.reject(new Error('Codex app-server stopped'))
+      for (const pending of this.rpc.values()) {
+        clearTimeout(pending.timeout)
+        pending.reject(new Error('Codex app-server stopped'))
+      }
       this.rpc.clear(); this.interactions.clear(); this.process = null
       child.kill('SIGTERM')
     }

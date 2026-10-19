@@ -1,10 +1,11 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { randomInt } from 'node:crypto'
 import { nanoid } from 'nanoid'
 import type { createProjectRepository } from '../../db/repositories/project.repository.js'
 import type { createWorktreeRepository } from '../../db/repositories/worktree.repository.js'
-import type { WeixinRepository, CodingTaskRecord } from '../../db/repositories/weixin.repository.js'
+import type { WeixinRepository, CodingTaskRecord, TaskInteraction } from '../../db/repositories/weixin.repository.js'
 import type { WorktreeService } from '../worktrees/worktree.service.js'
 import type { ProjectService } from '../projects/project.service.js'
 import type { AgentRegistry } from '../agents/agent.registry.js'
@@ -16,7 +17,6 @@ import { chunks, cleanAgentText, summarizeFinal } from './message.formatter.js'
 type ProjectRepo = ReturnType<typeof createProjectRepository>
 type WorktreeRepo = ReturnType<typeof createWorktreeRepository>
 type Pairing = { code: string; expiresAt: number } | null
-type QueuedRun = { task: CodingTaskRecord; cwd: string; imagePaths: string[]; agentId: string; worktreeId: string }
 
 const HELP = `可发送编码任务，也可以发送以下关键词：
 项目 / 切换项目
@@ -44,11 +44,15 @@ export function createWeixinService(deps: {
   fs.mkdirSync(mediaDir, { recursive: true, mode: 0o700 })
   const controllers = new Map<string, AbortController>()
   const activeDrivers = new Map<string, ReturnType<AgentRegistry['get']>>()
-  const queues = new Map<string, QueuedRun[]>()
+  const activeRuns = new Map<string, Promise<void>>()
   let pairing: Pairing = null
-  let stopped = false
+  let stopped = true
   let pollTimer: NodeJS.Timeout | null = null
   let outboxTimer: NodeJS.Timeout | null = null
+  let interactionTimer: NodeJS.Timeout | null = null
+  let pollAbort: AbortController | null = null
+  let pollPromise: Promise<void> | null = null
+  let outboxPromise: Promise<void> | null = null
   let lastError: string | null = null
 
   const enqueueText = (userId: string, text: string) => {
@@ -57,7 +61,17 @@ export function createWeixinService(deps: {
       const content = pieces.length > 1 ? `[${index + 1}/${pieces.length}]\n${part}` : part
       repo.enqueueOutbox({ id: `out_${nanoid()}`, accountId: config.weixin.accountId, userId, kind: 'text', payload: { text: content } })
     }
-    void flushOutbox()
+    requestOutboxFlush()
+  }
+
+  function requestOutboxFlush(): void {
+    if (outboxPromise) return
+    const promise = flushOutbox().catch((error) => {
+      lastError = `微信 outbox 异常：${(error as Error).message}`
+    }).finally(() => {
+      if (outboxPromise === promise) outboxPromise = null
+    })
+    outboxPromise = promise
   }
 
   async function flushOutbox(): Promise<void> {
@@ -71,6 +85,13 @@ export function createWeixinService(deps: {
         lastError = (error as Error).message
         repo.markOutboxFailed(item.id, item.attempts + 1, lastError)
       }
+    }
+  }
+
+  function expireTaskInteractions(): void {
+    for (const interaction of repo.expireTaskInteractions()) {
+      const controller = controllers.get(interaction.worktreeId)
+      if (controller && !controller.signal.aborted) controller.abort('interaction-timeout')
     }
   }
 
@@ -129,93 +150,137 @@ export function createWeixinService(deps: {
       repo.insertSession(session)
     }
     const task: CodingTaskRecord = { id: `task_${nanoid()}`, sessionId: session.id, sourceMessageSeq: seq,
-      prompt: text || '请分析附图并处理其中展示的问题。', status: 'queued', summary: null, detail: null,
+      prompt: text || '请分析附图并处理其中展示的问题。', imagePaths, status: 'queued', summary: null, detail: null,
       error: null, startedAt: null, completedAt: null, createdAt: timestamp, updatedAt: timestamp }
-    repo.insertTask(task)
-    const run = { task, cwd: worktree.path, imagePaths, agentId, worktreeId: worktree.id }
-    const queue = queues.get(worktree.id) ?? []
-    queue.push(run); queues.set(worktree.id, queue)
+    if (!repo.insertTask(task)) {
+      enqueueText(userId, '这条微信消息已经接收过，无需重复提交。')
+      return
+    }
     enqueueText(userId, `已收到任务 ${task.id.slice(-6)}。\n工作区：${worktree.displayName || worktree.name}\n助手：${driver.definition.name}${controllers.has(worktree.id) ? '\n当前工作区忙碌，任务已排队。' : ''}`)
-    void runNext(worktree.id, userId)
+    startWorker(worktree.id)
   }
 
-  async function runNext(worktreeId: string, userId: string): Promise<void> {
-    if (controllers.has(worktreeId)) return
-    const queue = queues.get(worktreeId)
-    const run = queue?.shift()
+  function startWorker(worktreeId: string): void {
+    if (stopped || activeRuns.has(worktreeId)) return
+    const promise = runNext(worktreeId).catch((error) => {
+      lastError = `微信任务 worker 异常：${(error as Error).message}`
+    }).finally(() => {
+      activeRuns.delete(worktreeId)
+      if (!stopped && repo.listQueuedWorktreeIds().includes(worktreeId)) startWorker(worktreeId)
+    })
+    activeRuns.set(worktreeId, promise)
+  }
+
+  async function runNext(worktreeId: string): Promise<void> {
+    const run = repo.claimNextQueuedTask(worktreeId)
     if (!run) return
+    const worktree = worktreeRepo.findById(worktreeId)
+    const session = repo.getSession(run.bindingId, worktreeId, run.agentId)
+    if (!worktree || !session) {
+      repo.updateTask(run.id, { status: 'failed', error: '任务关联的工作区或会话已经不存在。', completedAt: new Date().toISOString() })
+      enqueueText(run.userId, `任务 ${run.id.slice(-6)} 失败：关联的工作区或会话已经不存在。`)
+      return
+    }
     const controller = new AbortController(); controllers.set(worktreeId, controller)
-    const binding = repo.getBinding()!
-    const session = repo.getSession(binding.id, worktreeId, run.agentId)!
-    const driver = agents.get(run.agentId)
-    activeDrivers.set(worktreeId, driver)
     let detail = ''
     let lastProgressAt = 0
-    repo.updateTask(run.task.id, { status: 'running', startedAt: new Date().toISOString() })
-    repo.updateSession(session.id, { status: 'running' })
     try {
-      const result = await driver.run({ cwd: run.cwd, prompt: run.task.prompt, providerSessionId: session.providerSessionId,
-        imagePaths: run.imagePaths, signal: controller.signal, onEvent: async (event: AgentEvent) => {
+      const driver = agents.get(run.agentId)
+      activeDrivers.set(worktreeId, driver)
+      repo.updateSession(session.id, { status: 'running' })
+      const result = await driver.run({ cwd: worktree.path, prompt: run.prompt, providerSessionId: session.providerSessionId,
+        imagePaths: run.imagePaths, approvalMode: config.weixin.approvalMode, signal: controller.signal, onEvent: async (event: AgentEvent) => {
           if (event.type === 'session') repo.updateSession(session.id, { providerSessionId: event.sessionId })
           if (event.type === 'message') detail += `${event.text}\n`
           if (event.type === 'progress' && Date.now() - lastProgressAt > 120_000) {
-            lastProgressAt = Date.now(); enqueueText(userId, `[${run.task.id.slice(-6)}] ${event.message}`)
+            lastProgressAt = Date.now(); enqueueText(run.userId, `[${run.id.slice(-6)}] ${event.message}`)
           }
           if (event.type === 'question') {
-            repo.updateTask(run.task.id, { status: 'waiting' })
-            repo.setPending(binding.id, 'agent_question', { taskId: run.task.id, questionId: event.id, worktreeId })
-            enqueueText(userId, `[需要你决定]\n${event.text}${event.options?.length ? `\n${event.options.map((o, i) => `${i + 1}. ${o}`).join('\n')}` : ''}`)
+            repo.updateTask(run.id, { status: 'waiting' })
+            repo.setTaskInteraction({ id: `interaction_${nanoid()}`, bindingId: run.bindingId, taskId: run.id, worktreeId,
+              kind: 'question', agentInteractionId: event.id, payload: { text: event.text, options: event.options ?? [] } })
+            enqueueText(run.userId, `[任务 ${run.id.slice(-6)} 需要你回答]\n${event.text}${event.options?.length ? `\n${event.options.map((o, i) => `${i + 1}. ${o}`).join('\n')}` : ''}`)
           }
           if (event.type === 'approval') {
-            repo.updateTask(run.task.id, { status: 'waiting' })
-            repo.setPending(binding.id, 'agent_approval', { taskId: run.task.id, approvalId: event.id, worktreeId }, 5 * 60_000)
-            enqueueText(userId, `[需要确认]\n${event.text}\n1. 同意本次\n2. 拒绝`)
+            if (config.weixin.approvalMode === 'auto') driver.resolveInteraction?.(event.id, '1')
+            else {
+              repo.updateTask(run.id, { status: 'waiting' })
+              repo.setTaskInteraction({ id: `interaction_${nanoid()}`, bindingId: run.bindingId, taskId: run.id, worktreeId,
+                kind: 'approval', agentInteractionId: event.id, payload: { text: event.text } })
+              enqueueText(run.userId, `[任务 ${run.id.slice(-6)} 请求额外权限]\n${event.text}\n\n1. 同意本次\n2. 拒绝`)
+            }
           }
         } })
       const final = cleanAgentText(result.finalMessage)
       repo.updateSession(session.id, { providerSessionId: result.providerSessionId, status: 'ready' })
-      repo.updateTask(run.task.id, { status: 'completed', summary: final, detail: result.detail || detail, completedAt: new Date().toISOString() })
-      for (const part of summarizeFinal(`任务 ${run.task.id.slice(-6)} 已完成。\n\n${final}`)) enqueueText(userId, part)
+      repo.updateTask(run.id, { status: 'completed', summary: final, detail: result.detail || detail, completedAt: new Date().toISOString() })
+      for (const part of summarizeFinal(`任务 ${run.id.slice(-6)} 已完成。\n\n${final}`)) enqueueText(run.userId, part)
     } catch (error) {
       const cancelled = controller.signal.aborted
+      const timedOut = controller.signal.reason === 'interaction-timeout'
       repo.updateSession(session.id, { status: 'ready' })
-      repo.updateTask(run.task.id, { status: cancelled ? 'cancelled' : 'failed', error: (error as Error).message,
+      repo.updateTask(run.id, { status: cancelled ? 'cancelled' : 'failed', error: (error as Error).message,
         completedAt: new Date().toISOString() })
-      enqueueText(userId, cancelled ? `任务 ${run.task.id.slice(-6)} 已停止。` : `任务 ${run.task.id.slice(-6)} 失败：${(error as Error).message.slice(0, 700)}`)
+      enqueueText(run.userId, timedOut ? `任务 ${run.id.slice(-6)} 等待回复超时，已停止。`
+        : cancelled ? `任务 ${run.id.slice(-6)} 已停止。` : `任务 ${run.id.slice(-6)} 失败：${(error as Error).message.slice(0, 700)}`)
     } finally {
       controllers.delete(worktreeId)
       activeDrivers.delete(worktreeId)
-      const pending = repo.getPending(binding.id)
-      if (pending && pending.payload.taskId === run.task.id) repo.clearPending(binding.id)
-      void runNext(worktreeId, userId)
+      repo.closeTaskInteractions(run.id)
     }
+  }
+
+  function selectTaskInteraction(interactions: TaskInteraction[], text: string): { interaction: TaskInteraction; answer: string } | null {
+    if (interactions.length === 1) return { interaction: interactions[0], answer: text }
+    const match = text.trim().match(/^([A-Za-z0-9_-]{6})\s+([\s\S]+)$/)
+    if (!match) return null
+    const interaction = interactions.find((item) => item.taskId.endsWith(match[1]))
+    return interaction ? { interaction, answer: match[2].trim() } : null
+  }
+
+  async function handleTaskInteraction(bindingId: string, userId: string, text: string): Promise<boolean> {
+    const interactions = repo.listPendingTaskInteractions(bindingId)
+    if (!interactions.length) return false
+    const selected = selectTaskInteraction(interactions, text)
+    if (!selected) {
+      enqueueText(userId, `有多个任务正在等你回复，请使用“任务号 回答”：\n${interactions.map((item) =>
+        `${item.taskId.slice(-6)} ${item.kind === 'approval' ? '权限确认' : String(item.payload.text ?? '问题')}`).join('\n')}`)
+      return true
+    }
+    const { interaction } = selected
+    let answer = selected.answer
+    if (interaction.kind === 'approval' && !['1', '2'].includes(answer.trim())) {
+      enqueueText(userId, `任务 ${interaction.taskId.slice(-6)}：请回复 1 表示同意本次，或回复 2 拒绝。`)
+      return true
+    }
+    const options = Array.isArray(interaction.payload.options) ? interaction.payload.options.map(String) : []
+    const choice = Number(answer.trim())
+    if (interaction.kind === 'question' && options.length && Number.isInteger(choice) && choice >= 1 && choice <= options.length) {
+      answer = options[choice - 1]
+    }
+    const driver = activeDrivers.get(interaction.worktreeId)
+    if (!driver?.resolveInteraction) {
+      repo.closeTaskInteractions(interaction.taskId)
+      enqueueText(userId, `任务 ${interaction.taskId.slice(-6)} 已不在运行，这条回复没有提交。请重新发送任务。`)
+      return true
+    }
+    driver.resolveInteraction(interaction.agentInteractionId, answer)
+    repo.resolveTaskInteraction(interaction.id, answer)
+    repo.updateTask(interaction.taskId, { status: 'running' })
+    enqueueText(userId, interaction.kind === 'approval'
+      ? (answer.trim() === '1' ? '已同意本次操作，任务继续。' : '已拒绝这次额外权限。')
+      : `已将回答交给任务 ${interaction.taskId.slice(-6)}。`)
+    return true
   }
 
   async function handlePending(bindingId: string, userId: string, text: string, seq: number, images: string[]): Promise<boolean> {
     const pending = repo.getPending(bindingId)
     if (!pending) return false
     const choice = Number(text.trim())
-    if (pending.kind === 'agent_approval') {
-      if (![1, 2].includes(choice)) { enqueueText(userId, '请回复 1 表示同意本次，或回复 2 拒绝。'); return true }
-      const worktreeId = String(pending.payload.worktreeId)
-      activeDrivers.get(worktreeId)?.resolveInteraction?.(String(pending.payload.approvalId), String(choice))
-      repo.clearPending(bindingId)
-      repo.updateTask(String(pending.payload.taskId), { status: 'running' })
-      enqueueText(userId, choice === 1 ? '已同意本次操作，任务继续。' : '已拒绝，任务将继续采用受限方式处理。')
-      return true
-    }
-    if (pending.kind === 'agent_question') {
-      const worktreeId = String(pending.payload.worktreeId)
-      activeDrivers.get(worktreeId)?.resolveInteraction?.(String(pending.payload.questionId), text)
-      repo.clearPending(bindingId)
-      repo.updateTask(String(pending.payload.taskId), { status: 'running' })
-      enqueueText(userId, '已将回答交给 agent。')
-      return true
-    }
     if (pending.kind === 'active_message') {
-      if (![1, 2, 3].includes(choice)) { enqueueText(userId, '请回复 1、2 或 3。'); return true }
+      if (![1, 2].includes(choice)) { enqueueText(userId, '请回复 1 或 2。'); return true }
       repo.clearPending(bindingId)
-      if (choice !== 3) await submitTask(bindingId, userId, String(pending.payload.text), Number(pending.payload.seq), pending.payload.images as string[] ?? [])
+      if (choice === 1) await submitTask(bindingId, userId, String(pending.payload.text), Number(pending.payload.seq), pending.payload.images as string[] ?? [])
       else enqueueText(userId, '已取消这条消息。')
       return true
     }
@@ -274,6 +339,7 @@ export function createWeixinService(deps: {
     const binding = repo.getBinding()!
     const text = message.text.trim()
     const images = await saveMedia(message).catch((error) => { enqueueText(binding.userId, `图片下载失败：${(error as Error).message}`); return [] })
+    if (await handleTaskInteraction(binding.id, binding.userId, text)) return
     if (await handlePending(binding.id, binding.userId, text, message.seq, images)) return
     if (text === '帮助') { enqueueText(binding.userId, HELP); return }
     if (text === '项目' || text === '切换项目') { projectMenu(binding.id, binding.userId); return }
@@ -313,15 +379,14 @@ export function createWeixinService(deps: {
     }
     if (!binding.activeWorktreeId) { projectMenu(binding.id, binding.userId); return }
     if (controllers.has(binding.activeWorktreeId)) {
-      repo.setPending(binding.id, 'active_message', { text: text || '请分析附图。', seq: message.seq, images })
-      enqueueText(binding.userId, '当前任务仍在执行。这条消息用于：\n1. 补充当前任务\n2. 排队为新任务\n3. 取消')
+      await submitTask(binding.id, binding.userId, text, message.seq, images)
       return
     }
     await submitTask(binding.id, binding.userId, text, message.seq, images)
   }
 
   async function processMessage(message: WeixinMessage): Promise<void> {
-    if (message.direction !== 'in' || !repo.markProcessed(config.weixin.accountId, message.seq)) return
+    if (message.direction !== 'in' || repo.isProcessed(config.weixin.accountId, message.seq)) return
     const binding = repo.getBinding()
     if (!binding) {
       if (pairing && Date.now() < pairing.expiresAt && message.text.trim() === pairing.code) {
@@ -332,26 +397,36 @@ export function createWeixinService(deps: {
         enqueueText(message.user, `绑定成功。\n\n${HELP}`)
         projectMenu(repo.getBinding()!.id, message.user)
       }
+      repo.markProcessed(config.weixin.accountId, message.seq)
       return
     }
-    if (message.user !== binding.userId || message.user === '') return
+    if (message.user !== binding.userId || message.user === '') {
+      repo.markProcessed(config.weixin.accountId, message.seq)
+      return
+    }
     await handleOwnerMessage(message)
+    repo.markProcessed(config.weixin.accountId, message.seq)
   }
 
   async function poll(): Promise<void> {
     if (stopped || !config.weixin.enabled) return
+    pollAbort = new AbortController()
     try {
       let cursor = repo.getCursor(config.weixin.accountId)
       let page
       do {
-        page = await client.messages(cursor)
+        page = await client.messages(cursor, 200, pollAbort.signal)
         for (const message of page.messages) await processMessage(message)
         cursor = page.next_cursor
         repo.setCursor(config.weixin.accountId, cursor)
       } while (page.has_more && !stopped)
       lastError = null
-    } catch (error) { lastError = (error as Error).message }
-    if (!stopped) pollTimer = setTimeout(() => void poll(), config.weixin.pollIntervalMs)
+    } catch (error) {
+      if (!stopped || (error as Error).name !== 'AbortError') lastError = (error as Error).message
+    } finally {
+      pollAbort = null
+    }
+    if (!stopped) pollTimer = setTimeout(() => { pollPromise = poll() }, config.weixin.pollIntervalMs)
   }
 
   function cleanupMedia(): void {
@@ -365,23 +440,33 @@ export function createWeixinService(deps: {
 
   return {
     start() {
-      if (!config.weixin.enabled) return
-      cleanupMedia(); stopped = false; void poll(); outboxTimer = setInterval(() => void flushOutbox(), 2000)
+      if (!config.weixin.enabled || !stopped) return
+      cleanupMedia(); stopped = false
+      for (const task of repo.recoverInterruptedTasks()) {
+        enqueueText(task.userId, `任务 ${task.id.slice(-6)} 因 WorktreeHub 重启已安全中止，没有自动重放。请重新发送任务以重试。`)
+      }
+      for (const worktreeId of repo.listQueuedWorktreeIds()) startWorker(worktreeId)
+      pollPromise = poll(); outboxTimer = setInterval(requestOutboxFlush, 2000)
+      interactionTimer = setInterval(expireTaskInteractions, 5000)
     },
-    stop() {
+    async stop() {
       stopped = true
       if (pollTimer) clearTimeout(pollTimer)
       if (outboxTimer) clearInterval(outboxTimer)
+      if (interactionTimer) clearInterval(interactionTimer)
+      pollAbort?.abort()
       for (const controller of controllers.values()) controller.abort()
+      await Promise.allSettled(activeRuns.values())
+      await pollPromise
+      await outboxPromise
     },
     createPairingCode() {
-      const code = String(Math.floor(10000000 + Math.random() * 90000000))
+      const code = String(randomInt(10000000, 100000000))
       pairing = { code, expiresAt: Date.now() + 10 * 60_000 }
       return { code, expiresAt: new Date(pairing.expiresAt).toISOString() }
     },
     unbind() {
       for (const controller of controllers.values()) controller.abort()
-      queues.clear()
       repo.unbind()
       pairing = null
     },
@@ -397,7 +482,7 @@ export function createWeixinService(deps: {
         owner: binding ? { userId: binding.userId, displayName: binding.displayName } : null,
         pairing: pairing && Date.now() < pairing.expiresAt ? { code: pairing.code, expiresAt: new Date(pairing.expiresAt).toISOString() } : null,
         activeProjectId: binding?.activeProjectId ?? null, activeWorktreeId: binding?.activeWorktreeId ?? null,
-        activeAgentId: binding?.activeAgentId ?? 'codex', agents: agents.list(),
+        activeAgentId: binding?.activeAgentId ?? 'codex', approvalMode: config.weixin.approvalMode, agents: agents.list(),
         currentTask: task ? { id: task.id, status: task.status, prompt: task.prompt, summary: task.summary, error: task.error,
           worktreeId: task.worktreeId, agentId: task.agentId, createdAt: task.createdAt, completedAt: task.completedAt } : null,
         lastError,

@@ -4,12 +4,19 @@ import { createPortal } from 'react-dom'
 import { ReactGridLayout } from 'react-grid-layout/legacy'
 import type { LayoutItem } from 'react-grid-layout'
 import 'react-grid-layout/css/styles.css'
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CornerDownLeft, Mic, Plus, X } from 'lucide-react'
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CornerDownLeft, Maximize2, Mic, Minimize2, Plus, X } from 'lucide-react'
 import { GRID_COLS, GRID_ROWS, useLayoutStore } from '../../stores/layout.store.js'
 import { useTerminalStore } from '../../stores/terminal.store.js'
 import { useMediaQuery } from '../../hooks/useMediaQuery.js'
+import { CloseTerminalDialog } from './CloseTerminalDialog.js'
 import { TerminalPane } from './TerminalPane.js'
+import { TerminalTitleField } from './TerminalTitleField.js'
 import type { TerminalViewActions } from './XtermView.js'
+
+type MaximizeState = {
+  maximizedTerminalId: string | null
+  setMaximizedTerminalId: (terminalId: string | null) => void
+}
 
 const MARGIN = 8
 const KEYBOARD_KEYS_MARGIN_PX = 8
@@ -51,16 +58,33 @@ function useKeyboardBottomInset(): number {
 
 export function TerminalGrid() {
   const isMobile = useMediaQuery('(max-width: 767px)')
-  if (isMobile) return <MobileTerminalFocus />
-  return <DesktopTerminalGrid />
+  const activeScopeId = useLayoutStore((s) => s.activeScopeId)
+  const layoutsByScopeId = useLayoutStore((s) => s.layoutsByScopeId)
+  const [maximizedTerminalId, setMaximizedTerminalId] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!maximizedTerminalId) return
+    const ownerScopeId = Object.keys(layoutsByScopeId).find((scopeId) =>
+      (layoutsByScopeId[scopeId] ?? []).some((item) => item.i === maximizedTerminalId)
+    )
+    if (!ownerScopeId || ownerScopeId !== activeScopeId) {
+      setMaximizedTerminalId(null)
+    }
+  }, [activeScopeId, layoutsByScopeId, maximizedTerminalId])
+
+  const maximizeState = { maximizedTerminalId, setMaximizedTerminalId }
+  if (isMobile) return <MobileTerminalFocus {...maximizeState} />
+  return <DesktopTerminalGrid {...maximizeState} />
 }
 
-function DesktopTerminalGrid() {
+function DesktopTerminalGrid({ maximizedTerminalId, setMaximizedTerminalId }: MaximizeState) {
   const activeScopeId = useLayoutStore((s) => s.activeScopeId)
   const layoutsByScopeId = useLayoutStore((s) => s.layoutsByScopeId)
   const setLayoutForScope = useLayoutStore((s) => s.setLayoutForScope)
   const terminalIdToTitle = useLayoutStore((s) => s.terminalIdToTitle)
   const closeTerminal = useTerminalStore((s) => s.closeTerminal)
+  const renameTerminal = useTerminalStore((s) => s.renameTerminal)
+  const [pendingCloseId, setPendingCloseId] = useState<string | null>(null)
 
   const [size, setSize] = useState({ width: 0, height: 0 })
   const observerRef = useRef<ResizeObserver | null>(null)
@@ -95,21 +119,33 @@ function DesktopTerminalGrid() {
 
   const handleLayoutChange = useCallback(
     (scopeId: string, newLayout: readonly LayoutItem[]) => {
+      if (
+        maximizedTerminalId &&
+        newLayout.some((item) => item.i === maximizedTerminalId)
+      ) {
+        return
+      }
       if (newLayout.length > 0) {
         setLayoutForScope(scopeId, [...newLayout])
       }
     },
-    [setLayoutForScope]
+    [maximizedTerminalId, setLayoutForScope]
   )
 
-  const handleClose = useCallback(
-    (terminalId: string, e: React.MouseEvent) => {
-      e.stopPropagation()
-      e.preventDefault()
-      void closeTerminal(terminalId)
-    },
-    [closeTerminal]
-  )
+  const requestClose = useCallback((terminalId: string) => {
+    setPendingCloseId(terminalId)
+  }, [])
+
+  const cancelClose = useCallback(() => {
+    setPendingCloseId(null)
+  }, [])
+
+  const confirmClose = useCallback(() => {
+    if (!pendingCloseId) return
+    const terminalId = pendingCloseId
+    setPendingCloseId(null)
+    void closeTerminal(terminalId)
+  }, [closeTerminal, pendingCloseId])
 
   if (scopeIds.length === 0) {
     return (
@@ -123,7 +159,7 @@ function DesktopTerminalGrid() {
   }
 
   return (
-    <div ref={measureRef} className="relative flex-1 min-h-0 overflow-hidden">
+    <div ref={measureRef} className="terminal-grid relative flex-1 min-h-0 overflow-hidden">
       {size.width > 0 &&
         size.height > 0 &&
         scopeIds.map((scopeId) => {
@@ -148,49 +184,98 @@ function DesktopTerminalGrid() {
                 style={{ height: size.height }}
                 onLayoutChange={(newLayout) => handleLayoutChange(scopeId, newLayout)}
                 draggableHandle=".drag-handle"
+                draggableCancel=".terminal-pane-control"
                 resizeHandles={['se']}
                 compactType="vertical"
                 preventCollision={false}
                 isBounded
+                isDraggable={!scopeLayout.some((item) => item.i === maximizedTerminalId)}
+                isResizable={!scopeLayout.some((item) => item.i === maximizedTerminalId)}
               >
-                {scopeLayout.map((item) => (
+                {scopeLayout.map((item) => {
+                  const isMaximized = isActive && maximizedTerminalId === item.i
+                  const title = terminalIdToTitle[item.i] || item.i
+                  return (
                   <div
                     key={item.i}
-                    className="app-panel border rounded overflow-hidden flex flex-col"
+                    className={`app-panel border overflow-hidden flex flex-col ${isMaximized ? 'terminal-pane-maximized' : 'rounded'}`}
                   >
-                    <div className="drag-handle flex items-center justify-between px-2 py-1 app-panel-strong border-b cursor-move select-none">
-                      <span className="text-xs app-muted truncate">
-                        {terminalIdToTitle[item.i] || item.i}
-                      </span>
-                      <span
-                        role="button"
-                        onClick={(e) => handleClose(item.i, e)}
-                        onMouseDown={(e) => e.stopPropagation()}
-                        className="p-0.5 rounded cursor-pointer app-hover"
-                        title="Close terminal"
-                      >
-                        <X className="w-3 h-3 app-danger" />
+                    <div
+                      className={`drag-handle flex items-center justify-between gap-1 px-2 py-1 app-panel-strong border-b select-none ${isMaximized ? '' : 'cursor-move'}`}
+                      onDoubleClick={(event) => {
+                        if (event.target instanceof Element && event.target.closest('.terminal-pane-control')) return
+                        setMaximizedTerminalId(isMaximized ? null : item.i)
+                      }}
+                    >
+                      <div className="min-w-0 flex-1 text-xs app-muted">
+                        <TerminalTitleField
+                          title={title}
+                          onRename={(next) => renameTerminal(item.i, next)}
+                        />
+                      </div>
+                      <span className="ml-3 flex shrink-0 items-center">
+                        <button
+                          type="button"
+                          aria-pressed={isMaximized}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            event.preventDefault()
+                            setMaximizedTerminalId(isMaximized ? null : item.i)
+                          }}
+                          onMouseDown={(event) => event.stopPropagation()}
+                          className="terminal-pane-control app-icon-button p-1.5"
+                          aria-label={isMaximized ? 'Restore terminal' : 'Maximize terminal'}
+                          title={isMaximized ? 'Restore terminal' : 'Maximize terminal'}
+                        >
+                          {isMaximized ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+                        </button>
+                        <span className="mx-3 h-4 w-px shrink-0 bg-[var(--color-border)]" aria-hidden />
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            event.preventDefault()
+                            requestClose(item.i)
+                          }}
+                          onMouseDown={(event) => event.stopPropagation()}
+                          className="terminal-pane-control app-icon-button p-1.5"
+                          aria-label="Close terminal"
+                          title="Close terminal"
+                        >
+                          <X className="w-3.5 h-3.5 app-danger" />
+                        </button>
                       </span>
                     </div>
                     <div className="flex flex-col flex-1 min-h-0">
                       <TerminalPane terminalId={item.i} />
                     </div>
                   </div>
-                ))}
+                  )
+                })}
               </ReactGridLayout>
             </div>
           )
         })}
+      {pendingCloseId && createPortal(
+        <CloseTerminalDialog
+          title={terminalIdToTitle[pendingCloseId] || pendingCloseId}
+          onCancel={cancelClose}
+          onConfirm={confirmClose}
+        />,
+        document.body
+      )}
     </div>
   )
 }
 
-function MobileTerminalFocus() {
+function MobileTerminalFocus({ maximizedTerminalId, setMaximizedTerminalId }: MaximizeState) {
   const activeScopeId = useLayoutStore((s) => s.activeScopeId)
   const layoutsByScopeId = useLayoutStore((s) => s.layoutsByScopeId)
   const terminalIdToTitle = useLayoutStore((s) => s.terminalIdToTitle)
   const createNewTerminalForScope = useTerminalStore((s) => s.createNewTerminalForScope)
   const closeTerminal = useTerminalStore((s) => s.closeTerminal)
+  const renameTerminal = useTerminalStore((s) => s.renameTerminal)
+  const [pendingCloseId, setPendingCloseId] = useState<string | null>(null)
   const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null)
   const [terminalActions, setTerminalActions] = useState<TerminalViewActions | null>(null)
   const [voiceInputMode, setVoiceInputMode] = useState(false)
@@ -247,18 +332,26 @@ function MobileTerminalFocus() {
   const keyPadBottom = keyboardBottomInset + KEYBOARD_KEYS_MARGIN_PX
   const showVoiceDraftOverlay = voiceInputMode || Boolean(voiceDraft)
 
-  const handleCloseTerminal = useCallback(
-    (terminalId: string) => {
-      if (terminalId === activeTerminalId) {
-        const currentIndex = layout.findIndex((item) => item.i === terminalId)
-        const fallbackId =
-          layout[currentIndex + 1]?.i ?? layout[currentIndex - 1]?.i ?? null
-        setActiveTerminalId(fallbackId)
-      }
-      void closeTerminal(terminalId)
-    },
-    [activeTerminalId, closeTerminal, layout]
-  )
+  const requestCloseTerminal = useCallback((terminalId: string) => {
+    setPendingCloseId(terminalId)
+  }, [])
+
+  const cancelCloseTerminal = useCallback(() => {
+    setPendingCloseId(null)
+  }, [])
+
+  const confirmCloseTerminal = useCallback(() => {
+    if (!pendingCloseId) return
+    const terminalId = pendingCloseId
+    setPendingCloseId(null)
+    if (terminalId === activeTerminalId) {
+      const currentIndex = layout.findIndex((item) => item.i === terminalId)
+      const fallbackId =
+        layout[currentIndex + 1]?.i ?? layout[currentIndex - 1]?.i ?? null
+      setActiveTerminalId(fallbackId)
+    }
+    void closeTerminal(terminalId)
+  }, [activeTerminalId, closeTerminal, layout, pendingCloseId])
 
   const handleCreateTerminal = useCallback(() => {
     if (!activeScopeId) return
@@ -276,11 +369,14 @@ function MobileTerminalFocus() {
     )
   }
 
+  const isMaximized = maximizedTerminalId !== null
+
   return (
-    <div className="mobile-terminal-shell flex-none min-h-0 flex flex-col overflow-hidden">
+    <div className={`mobile-terminal-shell flex-none min-h-0 flex flex-col overflow-hidden ${isMaximized ? 'terminal-pane-maximized' : ''}`}>
       <div className="flex items-center gap-1 border-b app-panel-strong overflow-x-auto px-1 py-1">
         {layout.map((item, index) => {
           const isActive = item.i === activeTerminalId
+          const title = terminalIdToTitle[item.i] || `Terminal ${index + 1}`
           return (
             <div
               key={item.i}
@@ -289,22 +385,19 @@ function MobileTerminalFocus() {
                 ${isActive ? 'app-panel' : 'app-panel-strong app-muted'}
               `}
             >
-              <button
-                type="button"
-                onClick={() => {
+              <TerminalTitleField
+                title={title}
+                onActivate={() => {
                   setActiveTerminalId(item.i)
                   terminalActions?.focus()
                 }}
-                className="min-w-0 flex-1 truncate text-left"
-                title={terminalIdToTitle[item.i] || item.i}
-              >
-                {terminalIdToTitle[item.i] || `Terminal ${index + 1}`}
-              </button>
+                onRename={(next) => renameTerminal(item.i, next)}
+              />
               <button
                 type="button"
                 aria-label="Close terminal"
                 title="Close terminal"
-                onClick={() => handleCloseTerminal(item.i)}
+                onClick={() => requestCloseTerminal(item.i)}
                 className="app-icon-button flex h-6 w-6 shrink-0 items-center justify-center p-0"
               >
                 <X className="h-3.5 w-3.5" />
@@ -320,6 +413,19 @@ function MobileTerminalFocus() {
           className="app-icon-button flex h-8 w-8 shrink-0 items-center justify-center border p-0"
         >
           <Plus className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          aria-label={isMaximized ? 'Restore terminal' : 'Maximize terminal'}
+          title={isMaximized ? 'Restore terminal' : 'Maximize terminal'}
+          aria-pressed={isMaximized}
+          onClick={() => {
+            if (!activeTerminalId) return
+            setMaximizedTerminalId(isMaximized ? null : activeTerminalId)
+          }}
+          className="app-icon-button flex h-8 w-8 shrink-0 items-center justify-center border p-0"
+        >
+          {isMaximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
         </button>
         <button
           type="button"
@@ -365,7 +471,7 @@ function MobileTerminalFocus() {
       {createPortal(
         <>
           {showVoiceDraftOverlay && (
-            <div className="pointer-events-none fixed inset-x-0 top-0 z-40 px-3 pb-2 pt-[max(env(safe-area-inset-top),0.5rem)]">
+            <div className="pointer-events-none fixed inset-x-0 top-0 z-[48] px-3 pb-2 pt-[max(env(safe-area-inset-top),0.5rem)]">
               <div className="mx-auto flex max-w-screen-md items-start gap-2 rounded-md border px-3 py-2 shadow-lg backdrop-blur-sm app-panel">
                 <div className={`mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full ${voiceInputMode ? 'bg-emerald-500' : 'app-muted bg-current/40'}`} />
                 <div className="min-w-0 flex-1">
@@ -383,7 +489,7 @@ function MobileTerminalFocus() {
           {/* Floating arrow-key pad — fixed to the page, tracks the visual
               viewport so it rides up above the virtual keyboard. */}
           <div
-            className="fixed left-2 z-30 grid grid-cols-3 grid-rows-3 gap-1 pointer-events-none"
+            className="fixed left-2 z-[45] grid grid-cols-3 grid-rows-3 gap-1 pointer-events-none"
             style={{ bottom: keyPadBottom }}
           >
             <div />
@@ -406,7 +512,7 @@ function MobileTerminalFocus() {
           </div>
 
           <div
-            className="fixed left-2 z-30 pointer-events-none"
+            className="fixed left-2 z-[45] pointer-events-none"
             style={{ bottom: keyPadBottom + EXTRA_LEFT_KEY_OFFSET_PX }}
           >
             <FloatingKeyButton label="Tab" onPress={() => sendKey('\t')}>
@@ -415,7 +521,7 @@ function MobileTerminalFocus() {
           </div>
 
           {/* Floating Enter key — fixed to the page, right side */}
-          <div className="fixed right-2 z-30 pointer-events-none" style={{ bottom: keyPadBottom }}>
+          <div className="fixed right-2 z-[45] pointer-events-none" style={{ bottom: keyPadBottom }}>
             <FloatingKeyButton label="Enter" onPress={() => sendKey('\r')}>
               <CornerDownLeft className="w-4 h-4" />
             </FloatingKeyButton>
@@ -424,7 +530,7 @@ function MobileTerminalFocus() {
           {/* Floating interrupt (Ctrl+C) key — set well above Enter so a thumb
               reaching for Enter can't graze it and kill the running command. */}
           <div
-            className="fixed right-2 z-30 pointer-events-none"
+            className="fixed right-2 z-[45] pointer-events-none"
             style={{ bottom: keyPadBottom + INTERRUPT_KEY_OFFSET_PX }}
           >
             <FloatingKeyButton label="Interrupt (Ctrl+C)" onPress={() => sendKey('\x03')}>
@@ -433,7 +539,7 @@ function MobileTerminalFocus() {
           </div>
 
           <div
-            className="fixed right-2 z-30 pointer-events-none"
+            className="fixed right-2 z-[45] pointer-events-none"
             style={{ bottom: keyPadBottom + EXTRA_RIGHT_KEY_OFFSET_PX }}
           >
             <FloatingKeyButton label="Escape" onPress={() => sendKey('\x1b')}>
@@ -441,6 +547,14 @@ function MobileTerminalFocus() {
             </FloatingKeyButton>
           </div>
         </>,
+        document.body
+      )}
+      {pendingCloseId && createPortal(
+        <CloseTerminalDialog
+          title={terminalIdToTitle[pendingCloseId] || pendingCloseId}
+          onCancel={cancelCloseTerminal}
+          onConfirm={confirmCloseTerminal}
+        />,
         document.body
       )}
 

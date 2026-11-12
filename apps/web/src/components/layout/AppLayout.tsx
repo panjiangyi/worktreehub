@@ -21,14 +21,14 @@ export function AppLayout() {
   return (
     <div className="app-root">
       <Header />
-      <div className="flex flex-1 min-h-0 overflow-hidden">
+      <div className="app-body flex flex-1 min-h-0 overflow-hidden">
         <div
           className="hidden md:flex shrink-0 min-h-0"
           style={{ width: isDesktopSidebarCollapsed ? 0 : 520 }}
         >
           {!isDesktopSidebarCollapsed && <Sidebar />}
         </div>
-        <main className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+        <main className="app-main flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
           <WorktreeTabs />
           <TerminalGrid />
         </main>

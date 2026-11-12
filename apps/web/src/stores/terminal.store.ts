@@ -185,12 +185,15 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
   },
 
   renameTerminal: async (terminalId: string, title: string) => {
+    const normalized = title.trim()
+    if (!normalized) return
+
     try {
-      const terminal = await terminalsApi.updateTerminal(terminalId, { title })
+      const terminal = await terminalsApi.updateTerminal(terminalId, { title: normalized })
       set((state) => ({
         terminals: state.terminals.map((t) => (t.id === terminalId ? terminal : t)),
       }))
-      useLayoutStore.getState().setTerminalTitle(terminalId, title)
+      useLayoutStore.getState().setTerminalTitle(terminalId, terminal.title)
     } catch (error) {
       set({ error: (error as Error).message })
       throw error

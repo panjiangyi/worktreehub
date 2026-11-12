@@ -338,8 +338,9 @@ export function createTerminalService(
         throw new AppError(TERMINAL_NOT_FOUND, 'Terminal not found')
       }
 
-      if (input.title) {
-        terminalRepo.updateTitle(id, input.title)
+      const title = input.title?.trim()
+      if (title) {
+        terminalRepo.updateTitle(id, title)
       }
 
       const updated = terminalRepo.findById(id)!

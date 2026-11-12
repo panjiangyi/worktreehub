@@ -150,6 +150,21 @@ describe('directory terminals', () => {
 
     db.close()
   })
+
+  it('trims a renamed title and ignores a blank one', async () => {
+    const { rootPath, db, terminalService } = await createContext()
+    const actualDir = path.join(rootPath, 'workspace')
+    await fs.mkdir(actualDir)
+
+    const opened = terminalService.openDirectoryTerminal({ cwd: actualDir, title: 'shell' })
+    const renamed = terminalService.renameTerminal(opened.terminal.id, { title: '  build logs  ' })
+    expect(renamed.title).toBe('build logs')
+
+    const unchanged = terminalService.renameTerminal(opened.terminal.id, { title: '   ' })
+    expect(unchanged.title).toBe('build logs')
+
+    db.close()
+  })
 })
 
 async function insertWorktreeFixture(input: Awaited<ReturnType<typeof createContext>>) {

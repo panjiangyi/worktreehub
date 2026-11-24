@@ -181,3 +181,58 @@ describe('worktree archiving', () => {
     db.close()
   })
 })
+
+describe('default branch worktree resolution', () => {
+  it('reuses the primary worktree on the configured default branch', async () => {
+    const ctx = await createRepo()
+    const { db, service } = await createService(ctx)
+    try {
+      const wt = await service.resolveDefaultWorktree('proj_test')
+      expect(wt).toMatchObject({branch:'main',path:ctx.repoPath,isMain:true})
+      expect((await service.resolveDefaultWorktree('proj_test')).id).toBe(wt.id)
+    } finally { db.close() }
+  })
+
+  it('reuses a linked default-branch worktree, not a primary checkout on another branch', async () => {
+    const ctx = await createRepo()
+    await git(ctx.repoPath, ['switch','-c','feature'])
+    const target = path.join(ctx.worktreeBasePath,'existing-main')
+    await git(ctx.repoPath, ['worktree','add',target,'main'])
+    const { db, service } = await createService(ctx)
+    try {
+      expect(await service.resolveDefaultWorktree('proj_test')).toMatchObject({branch:'main',path:target,isMain:false})
+      expect((await git(ctx.repoPath,['branch','--show-current'])).stdout).toBe('feature')
+    } finally { db.close() }
+  })
+
+  it('attaches the existing default branch once without switching or modifying a dirty primary checkout', async () => {
+    const ctx = await createRepo()
+    await git(ctx.repoPath, ['switch','-c','feature'])
+    await writeFile(ctx.repoPath,'README.md','uncommitted')
+    const { db, service } = await createService(ctx)
+    try {
+      const [a,b] = await Promise.all([service.resolveDefaultWorktree('proj_test'),service.resolveDefaultWorktree('proj_test')])
+      expect(a.id).toBe(b.id)
+      expect(a.branch).toBe('main')
+      expect(a.createdByApp).toBe(true)
+      expect(a.path).not.toBe(ctx.repoPath)
+      expect((await git(a.path,['branch','--show-current'])).stdout).toBe('main')
+      expect((await git(ctx.repoPath,['branch','--show-current'])).stdout).toBe('feature')
+      expect(await fs.readFile(path.join(ctx.repoPath,'README.md'),'utf8')).toBe('uncommitted')
+      expect((await service.listWorktrees('proj_test')).filter(w=>w.branch==='main')).toHaveLength(1)
+    } finally { db.close() }
+  })
+
+  it('rejects an archived default checkout and a missing default branch', async () => {
+    const ctx = await createRepo()
+    const { db, service } = await createService(ctx)
+    try {
+      const wt = await service.resolveDefaultWorktree('proj_test')
+      service.updateWorktree(wt.id,{isArchived:true})
+      await expect(service.resolveDefaultWorktree('proj_test')).rejects.toMatchObject({code:'WORKTREE_ARCHIVED',statusCode:409})
+      await git(ctx.repoPath,['switch','-c','feature'])
+      await git(ctx.repoPath,['branch','-D','main'])
+      await expect(service.resolveDefaultWorktree('proj_test')).rejects.toMatchObject({code:'DEFAULT_BRANCH_NOT_FOUND',statusCode:409})
+    } finally { db.close() }
+  })
+})

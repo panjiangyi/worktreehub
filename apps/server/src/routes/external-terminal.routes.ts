@@ -72,6 +72,20 @@ export async function registerExternalTerminalRoutes(
     if (!pty.has(id)) throw new AppError('PTY_NOT_FOUND', 'Running terminal not found', 404)
     return terminals.renameTerminal(id, input)
   })
+  app.delete<{ Params: { terminalId: string } }>('/api/v1/terminals/:terminalId', async (request, reply) => {
+    const id = request.params.terminalId
+    // Reuse the same lifecycle as closing a pane in the web UI. Do not
+    // require a live PTY: exited and disconnected sessions can be removed too.
+    try {
+      terminals.deleteTerminal(id)
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'TERMINAL_NOT_FOUND') {
+        throw new AppError('TERMINAL_NOT_FOUND', 'Terminal not found', 404)
+      }
+      throw error
+    }
+    return reply.code(204).send()
+  })
   app.get<{ Params: { terminalId: string } }>('/api/v1/terminals/:terminalId/buffer', async request => {
     const id = request.params.terminalId
     const query = parse(bufferSchema, request.query)

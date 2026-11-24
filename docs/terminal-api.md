@@ -8,6 +8,7 @@ Base: http://127.0.0.1:3767/api/v1
 | --- | --- | --- |
 | GET | /terminals | List running PTYs, including minimized panes and directory sessions. Optional projectId and worktreeId filters. |
 | PATCH | /terminals/:id | Rename a running terminal (including minimized panes). |
+| DELETE | /terminals/:id | Close a terminal and remove its session. |
 | GET | /terminals/:id/buffer | Read a retained buffer snapshot. |
 | POST | /terminals/:id/input | Write text or special keys to a live PTY. |
 | GET | /terminals/:id/stream | Subscribe to live raw PTY data using SSE. |
@@ -21,6 +22,14 @@ Send PATCH /terminals/:id with a JSON body containing title. Titles are trimmed 
 ```sh
 curl -X PATCH -H "Authorization: Bearer $WTH_TOKEN" -H 'Content-Type: application/json' -d '{"title":"Claude Code - Fix cart"}' http://127.0.0.1:3767/api/v1/terminals/TERM_ID
 ```
+
+## Close a terminal
+
+```sh
+curl -i -X DELETE -H "Authorization: Bearer $WTH_TOKEN" http://127.0.0.1:3767/api/v1/terminals/TERM_ID
+```
+
+No request body is required. Returns HTTP 204 with no body on success. Uses the same lifecycle as closing a terminal in the web UI: kills the running PTY, removes its session record and broadcasts terminal-deleted to connected clients. Also supports minimized, exited and disconnected terminals. The in-memory terminal buffer is no longer available after closing. The project, branch, worktree directory and code files are not deleted. Closing may interrupt active commands; save any needed output before calling. Unknown or already removed IDs return 404 TERMINAL_NOT_FOUND. Authentication is unchanged.
 
 ## Buffer
 

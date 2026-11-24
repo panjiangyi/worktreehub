@@ -1,5 +1,6 @@
 import Fastify from 'fastify'
 import { registerExternalTerminalRoutes } from './routes/external-terminal.routes.js'
+import { registerExternalWorkspaceRoutes } from './routes/external-workspace.routes.js'
 import cookie from '@fastify/cookie'
 import websocket from '@fastify/websocket'
 import path from 'node:path'
@@ -134,6 +135,7 @@ export async function buildApp(config: AppConfig) {
   await registerTerminalRoutes(app, terminalService)
   await app.register(async scope => {
     await registerExternalTerminalRoutes(scope, terminalService, ptyManager, projectRepo, worktreeRepo)
+    await registerExternalWorkspaceRoutes(scope, projectService, worktreeService, terminalService, worktreeRepo)
   })
   await registerFsRoutes(app, fsService)
   await registerDebugRoutes(app)

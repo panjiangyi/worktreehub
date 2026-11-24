@@ -135,7 +135,71 @@ export function createWorktreeService(
     )
   }
 
+  // Serialize default-branch resolution for concurrent task launches in a project.
+  const defaultWorktreePending = new Map<string, Promise<Worktree>>()
+
   return {
+    async resolveDefaultWorktree(projectId: string): Promise<Worktree> {
+      const pending = defaultWorktreePending.get(projectId)
+      if (pending) return pending
+      const resolve = async (): Promise<Worktree> => {
+        const project = projectRepo.findById(projectId)
+        if (!project) throw new AppError(PROJECT_NOT_FOUND, 'Project not found', 404)
+        const branch = project.mainBranch
+        if (!branch || branch.startsWith('-') || !(await git.branchExists(project.repoPath, branch))) {
+          throw new AppError('DEFAULT_BRANCH_NOT_FOUND', 'Configured default local branch does not exist', 409)
+        }
+
+        const findCheckedOut = () => worktreeRepo.findByProjectId(projectId)
+          .filter(wt => wt.branch === branch)
+          .sort((a, b) => Number(b.isMain) - Number(a.isMain))
+        const verify = async (wt: Worktree): Promise<Worktree> => {
+          if (wt.isArchived) throw new AppError('WORKTREE_ARCHIVED', 'Default branch worktree is archived', 409)
+          if (await git.getCheckedOutBranch(wt.path) !== branch) {
+            throw new AppError('DEFAULT_WORKTREE_UNAVAILABLE', 'Default branch checkout is unavailable or changed', 409)
+          }
+          return wt
+        }
+
+        await this.syncProjectWorktrees(projectId)
+        const checkedOut = findCheckedOut()
+        if (checkedOut.length) {
+          const usable = checkedOut.find(wt => !wt.isArchived)
+          return verify(usable ?? checkedOut[0])
+        }
+
+        // Never change the checkout of an existing directory. If the default
+        // branch is not checked out, attach that same branch in a fresh path.
+        const target = path.resolve(project.worktreeBasePath, 'default-' + nanoid())
+        assertPathInside(project.worktreeBasePath, target)
+        try {
+          await git.attachBranchWorktree(project.repoPath, target, branch)
+        } catch (error) {
+          // Another process may have attached the branch after the first sync.
+          await this.syncProjectWorktrees(projectId)
+          const existing = findCheckedOut().find(wt => !wt.isArchived)
+          if (existing) return verify(existing)
+          throw error
+        }
+        await this.syncProjectWorktrees(projectId)
+        const attached = worktreeRepo.findByPath(target)
+        if (!attached || attached.projectId !== projectId || attached.branch !== branch) {
+          throw new AppError('DEFAULT_WORKTREE_UNAVAILABLE', 'Could not resolve default branch checkout', 409)
+        }
+        const verified = await verify(attached)
+        const result = { ...verified, createdByApp: true }
+        worktreeRepo.upsert(result)
+        return result
+      }
+      const operation = resolve()
+      defaultWorktreePending.set(projectId, operation)
+      try {
+        return await operation
+      } finally {
+        if (defaultWorktreePending.get(projectId) === operation) defaultWorktreePending.delete(projectId)
+      }
+    },
+
     async syncProjectWorktrees(projectId: string): Promise<void> {
       const project = projectRepo.findById(projectId)
       if (!project) return

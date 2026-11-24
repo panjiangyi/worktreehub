@@ -91,7 +91,7 @@ WorktreeHub 面向可信的个人开发环境。若需要从公网访问，请�
 
 ## External Terminal API
 
-Set `WORKTREEHUB_API_TOKEN` to a random secret of at least 32 characters in `.env` and restart. Requests require `Authorization: Bearer <token>`; the API is disabled by default. Use HTTPS or a private network. See [Terminal API](docs/terminal-api.md).
+Set `WORKTREEHUB_API_TOKEN` to a random secret of at least 32 characters in `.env` and restart. Requests require `Authorization: Bearer <token>`; the API is disabled by default. Use HTTPS or a private network. See [Terminal API](docs/terminal-api.md) and [Workspace API](docs/workspace-api.md) for project discovery, worktree creation, and terminal creation.
 
 ## 常用命令
 

@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom'
 import { ReactGridLayout } from 'react-grid-layout/legacy'
 import type { LayoutItem } from 'react-grid-layout'
 import 'react-grid-layout/css/styles.css'
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CornerDownLeft, Maximize2, Mic, Minimize2, Plus, X } from 'lucide-react'
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CornerDownLeft, Maximize2, Mic, Minus, Minimize2, Plus, X } from 'lucide-react'
 import { GRID_COLS, GRID_ROWS, useLayoutStore } from '../../stores/layout.store.js'
 import { useTerminalStore } from '../../stores/terminal.store.js'
 import { useMediaQuery } from '../../hooks/useMediaQuery.js'
@@ -85,6 +85,24 @@ function DesktopTerminalGrid({ maximizedTerminalId, setMaximizedTerminalId }: Ma
   const closeTerminal = useTerminalStore((s) => s.closeTerminal)
   const renameTerminal = useTerminalStore((s) => s.renameTerminal)
   const [pendingCloseId, setPendingCloseId] = useState<string | null>(null)
+  const [hidden, setHidden] = useState<string[]>(() => {
+    try { const value: unknown = JSON.parse(localStorage.getItem('worktreehub.minimized.v1') ?? '[]'); return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [] } catch { return [] }
+  })
+  const toggleHidden = (id: string) => {
+    setMaximizedTerminalId(null)
+    setHidden(previous => previous.includes(id) ? previous.filter(item => item !== id) : [...previous, id])
+  }
+  useEffect(() => { localStorage.setItem('worktreehub.minimized.v1', JSON.stringify(hidden)) }, [hidden])
+  const activeLayout = activeScopeId ? layoutsByScopeId[activeScopeId] ?? [] : []
+  const applyPreset = (preset: string) => {
+    if (!activeScopeId || !preset || activeLayout.some(item => hidden.includes(item.i))) return
+    const visible = activeLayout.filter(item => !hidden.includes(item.i))
+    const slots = preset === 'left-large' ? [[0,0,8,12], ...visible.slice(1).map((_, i) => [8, Math.floor(i * 12 / (visible.length - 1)), 4, Math.floor((i+1)*12/(visible.length-1))-Math.floor(i*12/(visible.length-1))])] : [[0,0,4,6],[0,6,4,6],[4,0,8,12]]
+    if (preset === 'left-large' && (visible.length < 2 || visible.length > 4)) return
+    if (preset === 'right-large' && visible.length !== 3) return
+    setMaximizedTerminalId(null)
+    setLayoutForScope(activeScopeId, [...visible.map((item,i) => ({ ...item, x: slots[i][0], y: slots[i][1], w: slots[i][2], h: slots[i][3] })), ...activeLayout.filter(item => hidden.includes(item.i)).map((item,i) => ({...item,x:0,y:12+i*item.h}))])
+  }
 
   const [size, setSize] = useState({ width: 0, height: 0 })
   const observerRef = useRef<ResizeObserver | null>(null)
@@ -159,6 +177,15 @@ function DesktopTerminalGrid({ maximizedTerminalId, setMaximizedTerminalId }: Ma
   }
 
   return (
+    <div className="flex flex-col flex-1 min-h-0">
+      <div className="flex items-center gap-2 px-2 py-1 border-b overflow-x-auto">
+        <select aria-label="Terminal layout preset" value="" disabled={activeLayout.some(item => hidden.includes(item.i))} onChange={event => applyPreset(event.target.value)} className="app-panel text-xs border rounded p-1">
+          <option value="">Layout presets</option>
+          <option value="left-large" disabled={activeLayout.filter(item => !hidden.includes(item.i)).length < 2 || activeLayout.filter(item => !hidden.includes(item.i)).length > 4}>Large left, small right</option>
+          <option value="right-large" disabled={activeLayout.filter(item => !hidden.includes(item.i)).length !== 3}>Two left, large right</option>
+        </select>
+        {activeLayout.filter(item => hidden.includes(item.i)).map(item => <button key={item.i} type="button" className="app-icon-button text-xs border rounded px-2 py-1 shrink-0" onClick={() => toggleHidden(item.i)}>Restore {terminalIdToTitle[item.i] || item.i}</button>)}
+      </div>
     <div ref={measureRef} className="terminal-grid relative flex-1 min-h-0 overflow-hidden">
       {size.width > 0 &&
         size.height > 0 &&
@@ -173,7 +200,7 @@ function DesktopTerminalGrid({ maximizedTerminalId, setMaximizedTerminalId }: Ma
               aria-hidden={!isActive}
             >
               <ReactGridLayout
-                layout={scopeLayout}
+                layout={scopeLayout.filter(item => !hidden.includes(item.i))}
                 width={size.width}
                 cols={GRID_COLS}
                 maxRows={GRID_ROWS}
@@ -182,17 +209,17 @@ function DesktopTerminalGrid({ maximizedTerminalId, setMaximizedTerminalId }: Ma
                 containerPadding={[MARGIN, MARGIN]}
                 autoSize={false}
                 style={{ height: size.height }}
-                onLayoutChange={(newLayout) => handleLayoutChange(scopeId, newLayout)}
+                onLayoutChange={(newLayout) => { if (!scopeLayout.some(item => hidden.includes(item.i))) handleLayoutChange(scopeId, newLayout) }}
                 draggableHandle=".drag-handle"
                 draggableCancel=".terminal-pane-control"
                 resizeHandles={['se']}
                 compactType="vertical"
                 preventCollision={false}
                 isBounded
-                isDraggable={!scopeLayout.some((item) => item.i === maximizedTerminalId)}
-                isResizable={!scopeLayout.some((item) => item.i === maximizedTerminalId)}
+                isDraggable={!scopeLayout.some((item) => item.i === maximizedTerminalId || hidden.includes(item.i))}
+                isResizable={!scopeLayout.some((item) => item.i === maximizedTerminalId || hidden.includes(item.i))}
               >
-                {scopeLayout.map((item) => {
+                {scopeLayout.filter(item => !hidden.includes(item.i)).map((item) => {
                   const isMaximized = isActive && maximizedTerminalId === item.i
                   const title = terminalIdToTitle[item.i] || item.i
                   return (
@@ -214,6 +241,7 @@ function DesktopTerminalGrid({ maximizedTerminalId, setMaximizedTerminalId }: Ma
                         />
                       </div>
                       <span className="ml-3 flex shrink-0 items-center">
+                        <button type="button" className="terminal-pane-control app-icon-button p-1.5" aria-label="Minimize terminal" title="Minimize terminal" onClick={() => toggleHidden(item.i)}><Minus className="w-3.5 h-3.5" /></button>
                         <button
                           type="button"
                           aria-pressed={isMaximized}
@@ -264,6 +292,7 @@ function DesktopTerminalGrid({ maximizedTerminalId, setMaximizedTerminalId }: Ma
         />,
         document.body
       )}
+    </div>
     </div>
   )
 }

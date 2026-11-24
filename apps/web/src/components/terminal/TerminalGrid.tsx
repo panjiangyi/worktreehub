@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { ReactNode, Dispatch, SetStateAction } from 'react'
 import { createPortal } from 'react-dom'
 import { ReactGridLayout } from 'react-grid-layout/legacy'
 import type { LayoutItem } from 'react-grid-layout'
@@ -11,11 +11,17 @@ import { useMediaQuery } from '../../hooks/useMediaQuery.js'
 import { CloseTerminalDialog } from './CloseTerminalDialog.js'
 import { TerminalPane } from './TerminalPane.js'
 import { TerminalTitleField } from './TerminalTitleField.js'
+import { PRESETS, PRESET_LABELS, applyLayoutPreset, tileVisible, matchesIds, type Preset } from './terminal-layout-presets.js'
 import type { TerminalViewActions } from './XtermView.js'
 
 type MaximizeState = {
   maximizedTerminalId: string | null
   setMaximizedTerminalId: (terminalId: string | null) => void
+  hidden: string[]
+  setHidden: Dispatch<SetStateAction<string[]>>
+  toggleHidden: (id: string) => void
+  overrides: Record<string, LayoutItem[]>
+  setOverrides: Dispatch<SetStateAction<Record<string, LayoutItem[]>>>
 }
 
 const MARGIN = 8
@@ -72,12 +78,26 @@ export function TerminalGrid() {
     }
   }, [activeScopeId, layoutsByScopeId, maximizedTerminalId])
 
-  const maximizeState = { maximizedTerminalId, setMaximizedTerminalId }
+  const [hidden, setHidden] = useState<string[]>(() => {
+    try { const data = JSON.parse(localStorage.getItem('worktreehub.minimized.v1') ?? '[]'); return Array.isArray(data) ? data.filter((id: unknown) => typeof id === 'string') : [] } catch { return [] }
+  })
+  const [overrides, setOverrides] = useState<Record<string, LayoutItem[]>>(() => {
+    try { return JSON.parse(localStorage.getItem('worktreehub.visibleLayouts.v1') ?? '{}') || {} } catch { return {} }
+  })
+  useEffect(() => { try { localStorage.setItem('worktreehub.minimized.v1', JSON.stringify(hidden)) } catch {} }, [hidden])
+  useEffect(() => { try { localStorage.setItem('worktreehub.visibleLayouts.v1', JSON.stringify(overrides)) } catch {} }, [overrides])
+  const toggleHidden = (id: string) => {
+    setMaximizedTerminalId(null)
+    setHidden(previous => previous.includes(id) ? previous.filter(item => item !== id) : [...previous, id])
+    const scope = Object.keys(layoutsByScopeId).find(key => layoutsByScopeId[key].some(item => item.i === id))
+    if (scope) setOverrides(previous => { const next = {...previous}; delete next[scope]; return next })
+  }
+  const maximizeState = { maximizedTerminalId, setMaximizedTerminalId, hidden, setHidden, toggleHidden, overrides, setOverrides }
   if (isMobile) return <MobileTerminalFocus {...maximizeState} />
   return <DesktopTerminalGrid {...maximizeState} />
 }
 
-function DesktopTerminalGrid({ maximizedTerminalId, setMaximizedTerminalId }: MaximizeState) {
+function DesktopTerminalGrid({ maximizedTerminalId, setMaximizedTerminalId, hidden, setHidden, toggleHidden, overrides, setOverrides }: MaximizeState) {
   const activeScopeId = useLayoutStore((s) => s.activeScopeId)
   const layoutsByScopeId = useLayoutStore((s) => s.layoutsByScopeId)
   const setLayoutForScope = useLayoutStore((s) => s.setLayoutForScope)
@@ -85,23 +105,22 @@ function DesktopTerminalGrid({ maximizedTerminalId, setMaximizedTerminalId }: Ma
   const closeTerminal = useTerminalStore((s) => s.closeTerminal)
   const renameTerminal = useTerminalStore((s) => s.renameTerminal)
   const [pendingCloseId, setPendingCloseId] = useState<string | null>(null)
-  const [hidden, setHidden] = useState<string[]>(() => {
-    try { const value: unknown = JSON.parse(localStorage.getItem('worktreehub.minimized.v1') ?? '[]'); return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [] } catch { return [] }
-  })
-  const toggleHidden = (id: string) => {
-    setMaximizedTerminalId(null)
-    setHidden(previous => previous.includes(id) ? previous.filter(item => item !== id) : [...previous, id])
-  }
-  useEffect(() => { localStorage.setItem('worktreehub.minimized.v1', JSON.stringify(hidden)) }, [hidden])
   const activeLayout = activeScopeId ? layoutsByScopeId[activeScopeId] ?? [] : []
-  const applyPreset = (preset: string) => {
-    if (!activeScopeId || !preset || activeLayout.some(item => hidden.includes(item.i))) return
-    const visible = activeLayout.filter(item => !hidden.includes(item.i))
-    const slots = preset === 'left-large' ? [[0,0,8,12], ...visible.slice(1).map((_, i) => [8, Math.floor(i * 12 / (visible.length - 1)), 4, Math.floor((i+1)*12/(visible.length-1))-Math.floor(i*12/(visible.length-1))])] : [[0,0,4,6],[0,6,4,6],[4,0,8,12]]
-    if (preset === 'left-large' && (visible.length < 2 || visible.length > 4)) return
-    if (preset === 'right-large' && visible.length !== 3) return
+  const visibleCount = activeLayout.filter(item => !hidden.includes(item.i)).length
+  const displayLayouts = useMemo(() => Object.fromEntries(Object.entries(layoutsByScopeId).map(([scope, all]) => {
+    const visible = all.filter(item => !hidden.includes(item.i))
+    const override = overrides[scope]
+    return [scope, override && matchesIds(override, visible) ? override : visible.length === all.length ? all : tileVisible(visible)]
+  })), [layoutsByScopeId, hidden, overrides])
+  const applyPreset = (preset: Preset) => {
+    if (!activeScopeId || !PRESETS[preset]) return
+    const visible = displayLayouts[activeScopeId] ?? []
+    if (visible.length < PRESETS[preset].length) return
+    const result = applyLayoutPreset(visible, preset)
     setMaximizedTerminalId(null)
-    setLayoutForScope(activeScopeId, [...visible.map((item,i) => ({ ...item, x: slots[i][0], y: slots[i][1], w: slots[i][2], h: slots[i][3] })), ...activeLayout.filter(item => hidden.includes(item.i)).map((item,i) => ({...item,x:0,y:12+i*item.h}))])
+    setHidden(previous => [...new Set([...previous, ...result.overflow])])
+    setOverrides(previous => ({...previous, [activeScopeId]: result.layout}))
+    if (result.overflow.length === 0 && !activeLayout.some(item => hidden.includes(item.i))) setLayoutForScope(activeScopeId, result.layout)
   }
 
   const [size, setSize] = useState({ width: 0, height: 0 })
@@ -179,10 +198,9 @@ function DesktopTerminalGrid({ maximizedTerminalId, setMaximizedTerminalId }: Ma
   return (
     <div className="flex flex-col flex-1 min-h-0">
       <div className="flex items-center gap-2 px-2 py-1 border-b overflow-x-auto">
-        <select aria-label="Terminal layout preset" value="" disabled={activeLayout.some(item => hidden.includes(item.i))} onChange={event => applyPreset(event.target.value)} className="app-panel text-xs border rounded p-1">
+        <select aria-label="Terminal layout preset" value="" onChange={event => applyPreset(event.target.value as Preset)} className="app-panel text-xs border rounded p-1">
           <option value="">Layout presets</option>
-          <option value="left-large" disabled={activeLayout.filter(item => !hidden.includes(item.i)).length < 2 || activeLayout.filter(item => !hidden.includes(item.i)).length > 4}>Large left, small right</option>
-          <option value="right-large" disabled={activeLayout.filter(item => !hidden.includes(item.i)).length !== 3}>Two left, large right</option>
+          {(Object.keys(PRESETS) as Preset[]).map(preset => <option key={preset} value={preset} disabled={visibleCount < PRESETS[preset].length}>{PRESET_LABELS[preset]}</option>)}
         </select>
         {activeLayout.filter(item => hidden.includes(item.i)).map(item => <button key={item.i} type="button" className="app-icon-button text-xs border rounded px-2 py-1 shrink-0" onClick={() => toggleHidden(item.i)}>Restore {terminalIdToTitle[item.i] || item.i}</button>)}
       </div>
@@ -190,7 +208,7 @@ function DesktopTerminalGrid({ maximizedTerminalId, setMaximizedTerminalId }: Ma
       {size.width > 0 &&
         size.height > 0 &&
         scopeIds.map((scopeId) => {
-          const scopeLayout = layoutsByScopeId[scopeId] ?? []
+          const scopeLayout = displayLayouts[scopeId] ?? []
           const isActive = scopeId === activeScopeId
           return (
             <div
@@ -200,7 +218,7 @@ function DesktopTerminalGrid({ maximizedTerminalId, setMaximizedTerminalId }: Ma
               aria-hidden={!isActive}
             >
               <ReactGridLayout
-                layout={scopeLayout.filter(item => !hidden.includes(item.i))}
+                layout={scopeLayout}
                 width={size.width}
                 cols={GRID_COLS}
                 maxRows={GRID_ROWS}
@@ -209,17 +227,19 @@ function DesktopTerminalGrid({ maximizedTerminalId, setMaximizedTerminalId }: Ma
                 containerPadding={[MARGIN, MARGIN]}
                 autoSize={false}
                 style={{ height: size.height }}
-                onLayoutChange={(newLayout) => { if (!scopeLayout.some(item => hidden.includes(item.i))) handleLayoutChange(scopeId, newLayout) }}
+                onLayoutChange={() => {}}
+                onDragStop={(newLayout) => { setOverrides(previous => ({...previous,[scopeId]: [...newLayout]})); if (!(layoutsByScopeId[scopeId] ?? []).some(item => hidden.includes(item.i))) handleLayoutChange(scopeId,newLayout) }}
+                onResizeStop={(newLayout) => { setOverrides(previous => ({...previous,[scopeId]: [...newLayout]})); if (!(layoutsByScopeId[scopeId] ?? []).some(item => hidden.includes(item.i))) handleLayoutChange(scopeId,newLayout) }}
                 draggableHandle=".drag-handle"
                 draggableCancel=".terminal-pane-control"
                 resizeHandles={['se']}
                 compactType="vertical"
                 preventCollision={false}
                 isBounded
-                isDraggable={!scopeLayout.some((item) => item.i === maximizedTerminalId || hidden.includes(item.i))}
-                isResizable={!scopeLayout.some((item) => item.i === maximizedTerminalId || hidden.includes(item.i))}
+                isDraggable={!scopeLayout.some((item) => item.i === maximizedTerminalId)}
+                isResizable={!scopeLayout.some((item) => item.i === maximizedTerminalId)}
               >
-                {scopeLayout.filter(item => !hidden.includes(item.i)).map((item) => {
+                {scopeLayout.map((item) => {
                   const isMaximized = isActive && maximizedTerminalId === item.i
                   const title = terminalIdToTitle[item.i] || item.i
                   return (
@@ -297,7 +317,7 @@ function DesktopTerminalGrid({ maximizedTerminalId, setMaximizedTerminalId }: Ma
   )
 }
 
-function MobileTerminalFocus({ maximizedTerminalId, setMaximizedTerminalId }: MaximizeState) {
+function MobileTerminalFocus({ maximizedTerminalId, setMaximizedTerminalId, hidden, toggleHidden }: MaximizeState) {
   const activeScopeId = useLayoutStore((s) => s.activeScopeId)
   const layoutsByScopeId = useLayoutStore((s) => s.layoutsByScopeId)
   const terminalIdToTitle = useLayoutStore((s) => s.terminalIdToTitle)
@@ -314,8 +334,8 @@ function MobileTerminalFocus({ maximizedTerminalId, setMaximizedTerminalId }: Ma
 
   const layout = useMemo(() => {
     if (!activeScopeId) return []
-    return layoutsByScopeId[activeScopeId] ?? []
-  }, [activeScopeId, layoutsByScopeId])
+    return (layoutsByScopeId[activeScopeId] ?? []).filter(item => !hidden.includes(item.i))
+  }, [activeScopeId, layoutsByScopeId, hidden])
   const scopeIds = useMemo(
     () => Object.keys(layoutsByScopeId).filter((id) => (layoutsByScopeId[id]?.length ?? 0) > 0),
     [layoutsByScopeId]
@@ -350,11 +370,11 @@ function MobileTerminalFocus({ maximizedTerminalId, setMaximizedTerminalId }: Ma
 
   const sendKey = useCallback(
     (data: string) => {
-      if (!activeTerminalId || !terminalActions) return
+      if (!activeTerminalId || hidden.includes(activeTerminalId) || !terminalActions) return
       terminalActions.sendInput(data)
       terminalActions.focus()
     },
-    [activeTerminalId, terminalActions]
+    [activeTerminalId, terminalActions, hidden]
   )
 
   const keyboardBottomInset = useKeyboardBottomInset()
@@ -387,7 +407,7 @@ function MobileTerminalFocus({ maximizedTerminalId, setMaximizedTerminalId }: Ma
     void createNewTerminalForScope(activeScopeId)
   }, [activeScopeId, createNewTerminalForScope])
 
-  if (!activeScopeId || layout.length === 0 || !activeTerminalId) {
+  if (!activeScopeId || (layoutsByScopeId[activeScopeId] ?? []).length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center app-subtle px-6">
         <div className="text-center">
@@ -403,6 +423,7 @@ function MobileTerminalFocus({ maximizedTerminalId, setMaximizedTerminalId }: Ma
   return (
     <div className={`mobile-terminal-shell flex-none min-h-0 flex flex-col overflow-hidden ${isMaximized ? 'terminal-pane-maximized' : ''}`}>
       <div className="flex items-center gap-1 border-b app-panel-strong overflow-x-auto px-1 py-1">
+        {(layoutsByScopeId[activeScopeId] ?? []).filter(item => hidden.includes(item.i)).map(item => <button key={item.i} type="button" className="app-icon-button border rounded px-2 py-1 text-xs shrink-0" onClick={() => toggleHidden(item.i)}>Restore {terminalIdToTitle[item.i] || item.i}</button>)}
         {layout.map((item, index) => {
           const isActive = item.i === activeTerminalId
           const title = terminalIdToTitle[item.i] || `Terminal ${index + 1}`
@@ -422,6 +443,7 @@ function MobileTerminalFocus({ maximizedTerminalId, setMaximizedTerminalId }: Ma
                 }}
                 onRename={(next) => renameTerminal(item.i, next)}
               />
+              <button type="button" aria-label="Minimize terminal" className="app-icon-button p-1" onClick={() => toggleHidden(item.i)}><Minus className="h-3.5 w-3.5" /></button>
               <button
                 type="button"
                 aria-label="Close terminal"
@@ -476,7 +498,7 @@ function MobileTerminalFocus({ maximizedTerminalId, setMaximizedTerminalId }: Ma
         {scopeIds.map((scopeId) => {
           const isActiveScope = scopeId === activeScopeId
           return (layoutsByScopeId[scopeId] ?? []).map((item) => {
-            const isActive = isActiveScope && item.i === activeTerminalId
+            const isActive = isActiveScope && item.i === activeTerminalId && !hidden.includes(item.i)
             return (
               <div
                 key={item.i}
@@ -497,7 +519,7 @@ function MobileTerminalFocus({ maximizedTerminalId, setMaximizedTerminalId }: Ma
         })}
       </div>
 
-      {createPortal(
+      {activeTerminalId && !hidden.includes(activeTerminalId) && createPortal(
         <>
           {showVoiceDraftOverlay && (
             <div className="pointer-events-none fixed inset-x-0 top-0 z-[48] px-3 pb-2 pt-[max(env(safe-area-inset-top),0.5rem)]">

@@ -16,7 +16,8 @@
 - 为每个项目配置 setup 脚本，新 worktree 创建后自动初始化
 - 在浏览器中打开绑定到 worktree 的真实终端
 - 页面刷新后恢复终端会话；浏览器断开时，后端任务继续运行
-- 支持多个终端分屏，方便同时查看不同任务
+- 支持多个终端分屏、预设布局、最小化和恢复；隐藏不终止进程
+- 外部程序可通过 API 查询运行终端、读取屏幕与历史、发送输入并订阅实时输出
 - 使用 xterm.js 本地回滚缓冲，提供自然的鼠标滚轮和触屏滚动体验
 - 针对手机提供方向键、`Tab`、`Esc`、`Enter`、`Ctrl+C` 等快捷按钮
 - 所有项目数据保存在本地 SQLite 数据库中
@@ -110,7 +111,7 @@ WorktreeHub 使用 pnpm workspace 管理三个包：
 worktreehub/
 ├── apps/
 │   ├── server/       # Fastify、SQLite、node-pty 和 Git 集成（主服务）
-│   ├── web/          # React、Vite、Zustand 和 xterm.js 前端
+│   └── web/          # React、Vite、Zustand 和 xterm.js 前端
 ├── packages/
 │   └── shared/       # 前后端共享类型与 WebSocket 协议
 ├── build-and-start.sh
@@ -121,26 +122,7 @@ worktreehub/
 
 ### 整体架构
 
-
-```text
-┌──────────────────────────── 浏览器 (apps/web) ────────────────────────────┐
-│  React 19 + Zustand stores（项目/终端/布局/认证）                            │
-│  xterm.js 渲染 · react-grid-layout 终端分屏 · 移动端快捷键                   │
-└──────────────┬───────────────────────────────────────────────────────────┘
-               │ REST (projects/worktrees/terminals/auth/fs/weixin)
-               │ WebSocket (/ws/terminal) — attach/input/resize/close
-┌──────────────▼──────────────────── 主服务 (apps/server) ──────────────────┐
-│ Fastify 5                                                            │
-│  routes ──► services ──► repositories (better-sqlite3)              │
-│              │                                                        │
-│              ├─► PtyManager (node-pty) + OutputReplayBuffer           │
-│              ├─► GitService (execa, 命令允许列表)                       │
-│              ├─► AuthService（会话 Cookie + 登录限流 + 同源校验）         │
-└──────────────┬───────────────────────────────────────────────────────────┘
-               │ HTTP (长轮询 /webhook 推送)
-│ Hono REST：收发微信文本/图片 · QR 扫码登录 · 多账号 · SQLite 消息历史        │
-└────────────────────────────────────────────────────────────────────────────┘
-```
+浏览器通过 REST 与 WebSocket 连接 Fastify 主服务；外部程序通过独立 Bearer Token 访问 `/api/v1/terminals`。主服务通过 node-pty 持有终端进程，使用 xterm/headless 解析屏幕，使用 SQLite 持久化项目和终端元数据。
 
 ### 后端分层（apps/server）
 
@@ -174,7 +156,6 @@ worktreehub/
 - 终端拥有当前系统用户权限，属高权限开发工具；README 明确提示公网部署需自备 HTTPS、反向代理与访问控制。
 
 
-- **任务与审批**：编码任务持久化为 `coding_sessions` / `coding_tasks`，`ask` 审批模式下，agent 的额外权限请求会作为 `weixin_task_interactions` 发回微信等待确认。原始终端不会转发到微信，bot 只发送任务确认、进度和整理后的结果。
 
 ### 前端（apps/web）
 

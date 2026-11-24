@@ -72,7 +72,11 @@ export async function registerExternalTerminalRoutes(
       lines = raw === '' ? [] : raw.split('\n')
     } else {
       // Wait until all writes queued before this read have been parsed.
-      await new Promise<void>(resolve => runtime.screen.write('', resolve))
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new AppError('BUFFER_BUSY', 'Terminal buffer unavailable; retry', 503)), 2000)
+        runtime.screen.write('', () => { clearTimeout(timeout); resolve() })
+      })
+      if (pty.get(id) !== runtime) throw new AppError('PTY_NOT_FOUND', 'Running terminal not found', 404)
       const buffer = runtime.screen.buffer.active
       const offset = query.format === 'screen' ? buffer.baseY : 0
       const limit = query.format === 'screen' ? Math.min(buffer.length, offset + runtime.screen.rows) : buffer.length
@@ -82,6 +86,23 @@ export async function registerExternalTerminalRoutes(
     const end = Math.min(lines.length, query.end ?? lines.length)
     return { terminalId: id, format: query.format, totalLines: lines.length, start: start < end ? start + 1 : null,
       end: start < end ? end : null, content: lines.slice(start, end).join('\n') }
+  })
+  app.get<{ Params: { terminalId: string } }>('/api/v1/terminals/:terminalId/stream', async (request, reply) => {
+    const id = request.params.terminalId
+    const runtime = pty.get(id)
+    if (!runtime) throw new AppError('PTY_NOT_FOUND', 'Running terminal not found', 404)
+    reply.hijack()
+    const response = reply.raw
+    response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' })
+    response.flushHeaders()
+    const send = (event: string, data: unknown) => {
+      if (!response.destroyed && !response.write('event: ' + event + '\n' + 'data: ' + JSON.stringify(data) + '\n\n')) response.destroy()
+    }
+    const output = runtime.pty.onData(data => send('output', {data}))
+    const exit = runtime.pty.onExit(({exitCode}) => { send('exit', {exitCode}); response.end() })
+    const timer = setInterval(() => { if (!response.destroyed && !response.write(': ping\n\n')) response.destroy() }, 15000)
+    response.once('close', () => { clearInterval(timer); output.dispose(); exit.dispose() })
+    send('ready', {terminalId:id})
   })
   app.post<{ Params: { terminalId: string } }>('/api/v1/terminals/:terminalId/input', async (request, reply) => {
     const id = request.params.terminalId

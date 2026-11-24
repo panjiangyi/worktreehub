@@ -1,5 +1,5 @@
 import pty from 'node-pty'
-import { Terminal } from '@xterm/headless'
+import headless from '@xterm/headless'
 import type { IPty } from 'node-pty'
 import type WebSocket from 'ws'
 import { buildShellLaunchConfig } from './compact-prompt.js'
@@ -80,13 +80,13 @@ export function createPtyManager() {
         terminalId: input.terminalId,
         pty: ptyProcess,
         outputBuffer,
-        screen: new Terminal({ cols: input.cols, rows: input.rows, scrollback: 10000, allowProposedApi: true }),
+        screen: new headless.Terminal({ cols: input.cols, rows: input.rows, scrollback: 10000, allowProposedApi: true }),
         clients: new Set(),
         createdAt: new Date().toISOString(),
       }
 
       ptyProcess.onData((data) => {
-        runtime.screen.write(data)
+        if (sessions.get(input.terminalId) === runtime) runtime.screen.write(data)
         // Live clients get full raw data (DA responses are needed for the current xterm session)
         for (const client of runtime.clients) {
           sendWs(client, {

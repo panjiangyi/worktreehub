@@ -49,6 +49,10 @@ export async function registerExternalTerminalRoutes(
   projects: ReturnType<typeof createProjectRepository>,
   worktrees: ReturnType<typeof createWorktreeRepository>,
 ) {
+  app.addHook('onRequest', async (request, reply) => {
+    authenticateExternalTerminalRequest(request)
+    reply.header('Cache-Control', 'no-store')
+  })
   app.get('/api/v1/terminals', async request => {
     const query = parse(filterSchema, request.query)
     return { terminals: terminals.listTerminals().filter(t =>

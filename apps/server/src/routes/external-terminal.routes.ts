@@ -23,6 +23,7 @@ const filterSchema = z.object({
 }).strict()
 const positive = z.string().regex(/^\d+$/).transform(Number).pipe(z.number().int().min(1).max(1000000))
 const bufferSchema = z.object({
+  format: z.enum(['raw', 'text', 'screen']).default('text'),
   tail: positive.optional(),
   start: positive.optional(),
   end: positive.optional(),
@@ -35,7 +36,7 @@ const inputSchema = z.union([
 ])
 const keys = { ENTER: '\r', CTRL_C: '\x03', ESC: '\x1b', TAB: '\t', UP: '\x1b[A', DOWN: '\x1b[B', LEFT: '\x1b[D', RIGHT: '\x1b[C' } as const
 
-function parse<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, data: unknown): T {
+function parse<S extends z.ZodTypeAny>(schema: S, data: unknown): z.output<S> {
   const result = schema.safeParse(data)
   if (!result.success) throw new AppError('VALIDATION_ERROR', result.error.message)
   return result.data
@@ -65,12 +66,21 @@ export async function registerExternalTerminalRoutes(
     const query = parse(bufferSchema, request.query)
     const runtime = pty.get(id)
     if (!runtime) throw new AppError('PTY_NOT_FOUND', 'Running terminal not found', 404)
-    const raw = runtime.outputBuffer.toString()
-    // Physical LF-delimited replay lines, not rendered terminal screen rows.
-    const lines = raw === '' ? [] : raw.split('\n')
+    let lines: string[]
+    if (query.format === 'raw') {
+      const raw = runtime.outputBuffer.toString()
+      lines = raw === '' ? [] : raw.split('\n')
+    } else {
+      // Wait until all writes queued before this read have been parsed.
+      await new Promise<void>(resolve => runtime.screen.write('', resolve))
+      const buffer = runtime.screen.buffer.active
+      const offset = query.format === 'screen' ? buffer.baseY : 0
+      const limit = query.format === 'screen' ? Math.min(buffer.length, offset + runtime.screen.rows) : buffer.length
+      lines = Array.from({ length: limit - offset }, (_, i) => buffer.getLine(offset + i)?.translateToString(true) ?? '')
+    }
     const start = query.tail !== undefined ? Math.max(0, lines.length - query.tail) : (query.start ?? 1) - 1
     const end = Math.min(lines.length, query.end ?? lines.length)
-    return { terminalId: id, format: 'raw', totalLines: lines.length, start: start < end ? start + 1 : null,
+    return { terminalId: id, format: query.format, totalLines: lines.length, start: start < end ? start + 1 : null,
       end: start < end ? end : null, content: lines.slice(start, end).join('\n') }
   })
   app.post<{ Params: { terminalId: string } }>('/api/v1/terminals/:terminalId/input', async (request, reply) => {

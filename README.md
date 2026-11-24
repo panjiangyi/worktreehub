@@ -38,7 +38,7 @@ pnpm run dev
 
 ## 环境要求
 
-- Node.js 22 LTS，版本约束见 `.nvmrc`
+- Node.js 25，版本约束见 `.nvmrc`
 - pnpm 10，推荐通过 Corepack 启用
 - macOS 或 Linux；v1 暂不支持 Windows
 - 本机已安装 Git
@@ -88,6 +88,10 @@ WorktreeHub 的终端由后端持有。只要后端仍在运行，即使关闭�
 
 WorktreeHub 面向可信的个人开发环境。若需要从公网访问，请在前面部署 HTTPS、反向代理以及额外的访问控制，不要直接把服务端口暴露到公网。
 
+## External Terminal API
+
+Set `WORKTREEHUB_API_TOKEN` to a random secret of at least 32 characters in `.env` and restart. Requests require `Authorization: Bearer <token>`; the API is disabled by default. Use HTTPS or a private network. See [Terminal API](docs/terminal-api.md).
+
 ## 常用命令
 
 ```bash
@@ -100,14 +104,13 @@ pnpm build      # 构建全部工作区
 
 ## 项目结构
 
-WorktreeHub 使用 pnpm workspace 管理四个包：
+WorktreeHub 使用 pnpm workspace 管理三个包：
 
 ```text
 worktreehub/
 ├── apps/
 │   ├── server/       # Fastify、SQLite、node-pty 和 Git 集成（主服务）
 │   ├── web/          # React、Vite、Zustand 和 xterm.js 前端
-│   └── weixin-bot/   # 独立运行的微信 iLink 协议 sidecar（Hono）
 ├── packages/
 │   └── shared/       # 前后端共享类型与 WebSocket 协议
 ├── build-and-start.sh
@@ -118,7 +121,6 @@ worktreehub/
 
 ### 整体架构
 
-WorktreeHub 是「单体后端 + SPA 前端 + 独立 sidecar」的本地优先应用。核心思想是**终端会话由后端进程持有**：浏览器只是远程渲染器，页面关闭或断网不会中断正在运行的构建和脚本。
 
 ```text
 ┌──────────────────────────── 浏览器 (apps/web) ────────────────────────────┐
@@ -134,10 +136,8 @@ WorktreeHub 是「单体后端 + SPA 前端 + 独立 sidecar」的本地优先�
 │              ├─► PtyManager (node-pty) + OutputReplayBuffer           │
 │              ├─► GitService (execa, 命令允许列表)                       │
 │              ├─► AuthService（会话 Cookie + 登录限流 + 同源校验）         │
-│              └─► WeixinService ──► AgentRegistry（Codex/Claude Code/…）│
 └──────────────┬───────────────────────────────────────────────────────────┘
                │ HTTP (长轮询 /webhook 推送)
-┌──────────────▼──────────── sidecar (apps/weixin-bot) ─────────────────────┐
 │ Hono REST：收发微信文本/图片 · QR 扫码登录 · 多账号 · SQLite 消息历史        │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -159,7 +159,6 @@ WorktreeHub 是「单体后端 + SPA 前端 + 独立 sidecar」的本地优先�
 ### 数据层（apps/server）
 
 - **存储**：`better-sqlite3` 同步驱动，默认路径 `~/.worktreehub/worktreehub.sqlite`。启动时执行 `schema.sql`（`CREATE TABLE IF NOT EXISTS`）、增量迁移（`runMigrations`，按列存在性判断）和索引创建。
-- **核心表**：`projects`（项目 + setup 脚本）、`worktrees`（含 dirty / archived / merge 状态）、`terminal_sessions`（终端元数据，scope 模型区分 worktree 与 directory）；微信集成相关：`weixin_bindings`、`coding_sessions`、`coding_tasks`、`weixin_task_interactions`、`weixin_outbox` 等。
 
 ### Git 集成层
 
@@ -174,10 +173,7 @@ WorktreeHub 是「单体后端 + SPA 前端 + 独立 sidecar」的本地优先�
 - 文件系统操作经 `path-safety.ts` 限制在受管理的项目与 worktree 目录内；Git 操作只接受白名单命令。
 - 终端拥有当前系统用户权限，属高权限开发工具；README 明确提示公网部署需自备 HTTPS、反向代理与访问控制。
 
-### 微信编码集成（apps/weixin-bot）
 
-- **sidecar 职责**：`weixin-bot` 是独立进程（Hono），封装腾讯 iLink 微信 bot 协议为 REST API——收发文本/图片、QR 扫码登录、多账号隔离、按用户持久化的 SQLite 消息历史，以及带 HMAC 签名的 webhook 推送。
-- **主服务侧**：`WeixinService` 以短轮询（默认 2s）拉取消息，用 `weixin_outbox` 表保证发送可靠性；`AgentRegistry` 把任务分发给 driver——内置 Codex（`codex-app-server.driver`）、Claude Code / OpenCode 等进程型 driver，以及自定义命令 driver。
 - **任务与审批**：编码任务持久化为 `coding_sessions` / `coding_tasks`，`ask` 审批模式下，agent 的额外权限请求会作为 `weixin_task_interactions` 发回微信等待确认。原始终端不会转发到微信，bot 只发送任务确认、进度和整理后的结果。
 
 ### 前端（apps/web）
@@ -203,24 +199,6 @@ WorktreeHub 是「单体后端 + SPA 前端 + 独立 sidecar」的本地优先�
 | `WORKTREEHUB_AUTH_IP_WINDOW_MS` | `900000` | 单个 IP 登录失败统计窗口，单位为毫秒 |
 | `WORKTREEHUB_AUTH_GLOBAL_FAILURE_LIMIT` | `10` | 全局登录失败次数限制 |
 | `WORKTREEHUB_AUTH_GLOBAL_COOLDOWN_MS` | `900000` | 触发全局限制后的冷却时间，单位为毫秒 |
-| `WORKTREEHUB_WEIXIN_ENABLED` | `0` | 设为 `1` 启用微信编码集成 |
-| `WORKTREEHUB_WEIXIN_PORT` | `47890` | 内置 `weixin-bot-service` 监听端口 |
-| `WORKTREEHUB_WEIXIN_BASE_URL` | `http://127.0.0.1:47890` | WorktreeHub 访问 sidecar 的地址 |
-| `WORKTREEHUB_WEIXIN_API_KEY` | 无 | 微信 sidecar 的 API key |
-| `WORKTREEHUB_WEIXIN_ACCOUNT_ID` | 无 | 用于编码消息的 bot account id |
-| `WORKTREEHUB_WEIXIN_STATE_DIR` | `~/.openclaw-poc` | sidecar 会话、历史消息和媒体文件目录 |
-| `WORKTREEHUB_WEIXIN_APPROVAL_MODE` | `ask` | `ask` 会把额外权限请求发回微信确认；仅在可信环境中使用 `auto` |
-
-## 微信编码
-
-WorktreeHub 可以通过独立运行的 `weixin-bot-service` 接收微信文本和图片，并把任务交给 Codex、Claude Code、OpenCode 或自定义命令 driver。原始终端不会转发到微信；机器人只发送任务确认、阶段进度、问题和整理后的结果。
-
-1. 启动并登录 `weixin-bot-service`。
-2. 在 WorktreeHub 根目录 `.env` 中配置微信变量并重启。`server` 和 `weixin-bot-service` 现在共用这一份配置。
-3. 打开 Settings，确认 Sidecar 为 Connected，点击 Pair owner。
-4. 将八位配对码发送给微信 bot，然后按编号选择项目和 worktree。
-
-集成只允许一个已绑定的微信所有者。普通消息会成为当前 worktree 的编码任务；发送“帮助”可查看项目、工作区、助手、状态、停止和详情等控制词。
 
 ## 安全说明
 

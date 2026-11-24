@@ -31,16 +31,6 @@ function createConfig(rootPath: string): AppConfig {
       rows: 30,
       scrollback: 10000,
     },
-    weixin: {
-      enabled: false,
-      baseUrl: 'http://127.0.0.1:3000',
-      apiKey: '',
-      accountId: '',
-      pollIntervalMs: 2000,
-      mediaMaxBytes: 20 * 1024 * 1024,
-      mediaRetentionMs: 7 * 24 * 60 * 60 * 1000,
-      approvalMode: 'ask',
-    },
   }
 }
 

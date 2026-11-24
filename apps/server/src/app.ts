@@ -1,4 +1,5 @@
 import Fastify from 'fastify'
+import { registerExternalTerminalRoutes, authenticateExternalTerminalRequest } from './routes/external-terminal.routes.js'
 import cookie from '@fastify/cookie'
 import websocket from '@fastify/websocket'
 import path from 'node:path'
@@ -86,6 +87,10 @@ export async function buildApp(config: AppConfig) {
     request.raw.url = normalizeAbsoluteRequestUrl(request.raw.url ?? '')
 
     const routePath = request.raw.url ?? ''
+    if (routePath.startsWith('/api/v1/')) {
+      authenticateExternalTerminalRequest(request)
+      return
+    }
     if (routePath === '/health' || routePath.startsWith('/api/auth/') || routePath.startsWith('/api/debug/')) {
       return
     }
@@ -145,6 +150,7 @@ export async function buildApp(config: AppConfig) {
   await registerProjectRoutes(app, projectService)
   await registerWorktreeRoutes(app, worktreeService)
   await registerTerminalRoutes(app, terminalService)
+  await registerExternalTerminalRoutes(app, terminalService, ptyManager, projectRepo, worktreeRepo)
   await registerFsRoutes(app, fsService)
   await registerDebugRoutes(app)
   await registerWeixinRoutes(app, weixinService)

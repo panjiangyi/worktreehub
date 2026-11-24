@@ -7,11 +7,20 @@ Base: http://127.0.0.1:3767/api/v1
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | /terminals | List running PTYs, including minimized panes and directory sessions. Optional projectId and worktreeId filters. |
+| PATCH | /terminals/:id | Rename a running terminal (including minimized panes). |
 | GET | /terminals/:id/buffer | Read a retained buffer snapshot. |
 | POST | /terminals/:id/input | Write text or special keys to a live PTY. |
 | GET | /terminals/:id/stream | Subscribe to live raw PTY data using SSE. |
 
 List returns a terminals array with session IDs, project and worktree IDs, projectName, branch, title, cwd, scope and status. Directory terminals have null project/worktree IDs. Minimized is a browser-local presentation state; the API lists all running PTYs regardless of visibility.
+
+## Rename
+
+Send PATCH /terminals/:id with a JSON body containing title. Titles are trimmed and must be 1–200 characters with no embedded control characters. Returns HTTP 200 with the updated terminal session. The title is persisted in SQLite and broadcast to connected web clients; the PTY, working directory and buffer are unchanged. Missing or stopped terminals return 404.
+
+```sh
+curl -X PATCH -H "Authorization: Bearer $WTH_TOKEN" -H 'Content-Type: application/json' -d '{"title":"Claude Code - Fix cart"}' http://127.0.0.1:3767/api/v1/terminals/TERM_ID
+```
 
 ## Buffer
 

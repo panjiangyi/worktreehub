@@ -27,11 +27,16 @@ async function fixture() {
   await new Promise<void>(resolve => screen.write(raw, resolve))
   const writeToTerminal = vi.fn()
   const sessions = [{id:'one',status:'running',projectId:'p1',worktreeId:'w1'},{id:'two',status:'exited',projectId:'p2',worktreeId:'w2'}]
+  const renameTerminal = vi.fn((id:string, input:{title:string}) => {
+    const session = sessions.find(item => item.id === id)!
+    Object.assign(session, input)
+    return {...session, ...input}
+  })
   const runtime = {screen,outputBuffer}
-  await registerExternalTerminalRoutes(app, {listTerminals:()=>sessions,writeToTerminal} as never,
+  await registerExternalTerminalRoutes(app, {listTerminals:()=>sessions,writeToTerminal,renameTerminal} as never,
     {has:(id:string)=>id==='one',get:(id:string)=>id==='one'?runtime:undefined} as never,
     {findById:()=>({name:'Project'})} as never,{findById:()=>({branch:'main'})} as never)
-  return {app,writeToTerminal,screen}
+  return {app,writeToTerminal,screen,renameTerminal}
 }
 afterEach(async () => {
   await Promise.all(apps.splice(0).map(app=>app.close()))
@@ -52,6 +57,25 @@ describe('external terminal API', () => {
     const result=await app.inject({url:'/api/v1/terminals?projectId=p1&worktreeId=w1',headers})
     expect(result.json()).toEqual({terminals:[expect.objectContaining({id:'one',projectName:'Project',branch:'main'})]})
     expect((await app.inject({url:'/api/v1/terminals?projectId=p2',headers})).json()).toEqual({terminals:[]})
+  })
+  it('renames a live terminal, validates titles, and requires bearer auth', async () => {
+    const {app,renameTerminal,writeToTerminal}=await fixture()
+    const patch=(id:string,payload:object)=>app.inject({method:'PATCH',url:'/api/v1/terminals/'+id,headers,payload})
+    const renamed=await patch('one',{title:'  修复购物车  '})
+    expect(renamed.statusCode).toBe(200)
+    expect(renamed.json()).toMatchObject({id:'one',title:'修复购物车'})
+    expect(renameTerminal).toHaveBeenCalledWith('one',{title:'修复购物车'})
+    expect((await app.inject({url:'/api/v1/terminals',headers})).json().terminals[0].title).toBe('修复购物车')
+    expect((await patch('one',{title:'   '})).statusCode).toBe(400)
+    expect((await patch('one',{title:'a'.repeat(201)})).statusCode).toBe(400)
+    expect((await patch('one',{title:'a\nb'})).statusCode).toBe(400)
+    expect((await patch('one',{title:'test',id:'two'})).statusCode).toBe(400)
+    expect((await patch('one',{})).statusCode).toBe(400)
+    expect((await patch('two',{title:'exited'})).statusCode).toBe(404)
+    expect((await patch('missing',{title:'missing'})).statusCode).toBe(404)
+    expect((await app.inject({method:'PATCH',url:'/api/v1/terminals/one',payload:{title:'unauthorized'}})).statusCode).toBe(401)
+    expect(renameTerminal).toHaveBeenCalledTimes(1)
+    expect(writeToTerminal).not.toHaveBeenCalled()
   })
   it('supports raw ranges, tail, parsed screen and invalid ranges', async () => {
     const {app,screen}=await fixture()

@@ -30,6 +30,7 @@ const bufferSchema = z.object({
 }).strict().refine(q => q.tail !== undefined ? q.start === undefined && q.end === undefined :
   (q.start === undefined && q.end === undefined) || (q.start !== undefined && q.end !== undefined && q.start <= q.end),
   'Use tail or an inclusive start/end range')
+const renameSchema = z.object({ title: z.string().trim().min(1).max(200).refine(value => !/[\u0000-\u001f\u007f-\u009f]/u.test(value), 'Title must not contain control characters') }).strict()
 const inputSchema = z.union([
   z.object({ text: z.string().max(65536), submit: z.boolean().default(false) }).strict(),
   z.object({ key: z.enum(['ENTER', 'CTRL_C', 'ESC', 'TAB', 'UP', 'DOWN', 'LEFT', 'RIGHT']) }).strict(),
@@ -64,6 +65,12 @@ export async function registerExternalTerminalRoutes(
       projectName: t.projectId ? projects.findById(t.projectId)?.name ?? null : null,
       branch: t.worktreeId ? worktrees.findById(t.worktreeId)?.branch ?? null : null,
     })) }
+  })
+  app.patch<{ Params: { terminalId: string } }>('/api/v1/terminals/:terminalId', async request => {
+    const id = request.params.terminalId
+    const input = parse(renameSchema, request.body)
+    if (!pty.has(id)) throw new AppError('PTY_NOT_FOUND', 'Running terminal not found', 404)
+    return terminals.renameTerminal(id, input)
   })
   app.get<{ Params: { terminalId: string } }>('/api/v1/terminals/:terminalId/buffer', async request => {
     const id = request.params.terminalId

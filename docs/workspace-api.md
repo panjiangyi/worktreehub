@@ -16,6 +16,7 @@ All paths below are relative to WTH_BASE.
 | GET | /projects/:projectId/branches | 200 |
 | POST | /projects/:projectId/worktrees | 201 |
 | POST | /projects/:projectId/worktrees/:worktreeId/terminals | 201 |
+| POST | /projects/:projectId/terminals | 201 |
 
 ## List projects
 
@@ -80,6 +81,23 @@ Returns 201 and a TerminalSession object directly, including id, projectId, work
 
 A successful terminal creation does not mean the initial command has finished or the Agent is ready. Read the screen buffer before sending additional input. To use an existing terminal, list running terminals instead of creating another.
 
+## Start a task directly on the project's default branch
+
+```sh
+curl -sS -X POST "$WTH_BASE/projects/PROJECT_ID/terminals" \
+  -H "Authorization: Bearer $WTH_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Fix cart","initialCommand":"claude \"Fix the cart bug\""}'
+```
+
+No branch or worktree ID is needed. Body fields are the same as in the previous section (title, initialCommand, cols, rows; all optional). initialCommand is an ordinary shell command, not a separate AI prompt field. Omit it for a plain terminal. The installed coding agent must support the command you supply.
+
+The server resolves the project's configured mainBranch, not necessarily a branch named main. It reuses the existing checkout of that branch (preferring the primary checkout). If the local default branch exists but is not checked out, the server attaches it in a new worktree under the configured base path without creating a new branch. It does not switch an existing checkout, pull, reset, force checkout, or commit. This automatic attachment does not run the project's setup script; initialize dependencies explicitly if needed.
+
+Returns 201 with the TerminalSession fields plus branch. The returned worktreeId identifies the resolved checkout. Missing default local branches return 409 DEFAULT_BRANCH_NOT_FOUND; unavailable checkouts return 409 DEFAULT_WORKTREE_UNAVAILABLE; archived checkouts return 409 WORKTREE_ARCHIVED. Other Git failures may use existing error codes. A missing project returns 404.
+
+Multiple launches can share the same default-branch checkout and its uncommitted changes. This is not task isolation; avoid concurrent changes to the same files. The existing terminal input and screen APIs apply, and 201 means the terminal was created, not that the task completed. The operation is not idempotent.
+
 ## Errors and retries
 
 All routes use the external API's authentication. Missing projects and wrong/missing worktrees return 404 (PROJECT_NOT_FOUND or WORKTREE_NOT_FOUND); archived worktrees return 409 WORKTREE_ARCHIVED. Invalid fields return 400 VALIDATION_ERROR. Existing service errors such as BRANCH_EXISTS, BASE_REF_NOT_FOUND, UNSAFE_PATH, WORKTREE_PATH_EXISTS, and WORKTREE_PATH_NOT_FOUND are returned with their existing status codes (generally 400). Unknown Git/process errors may return 500 INTERNAL_ERROR. Invalid or missing token returns 401; disabled API returns 503. Unknown request fields and query parameters are rejected.
@@ -87,6 +105,8 @@ All routes use the external API's authentication. Missing projects and wrong/mis
 Creation is not idempotent. If a request times out, query the project/worktrees or running terminals to reconcile before retrying.
 
 ## Agent workflow
+
+For work directly on the default branch, use POST /projects/:projectId/terminals with an optional initialCommand and proceed directly to terminal monitoring. For isolated feature branches:
 
 1. GET /projects to locate the registered project.
 2. GET /projects/:projectId/worktrees and reuse a matching worktree if it exists.

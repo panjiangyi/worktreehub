@@ -23,7 +23,7 @@ async function fixture() {
   const created = {id:'w4',projectId:'p1',isArchived:false}
   const findById = vi.fn((id:string) => [existing,other,archived,created].find(w=>w.id===id))
   const projects = {listProjects:vi.fn(()=>[project,{id:'p2',mainBranch:'dev'}]),listBranches:vi.fn(async()=>({local:['main'],remote:['origin/main']}))}
-  const worktrees = {syncProjectWorktrees:vi.fn(async()=>{}),listWorktrees:vi.fn(async()=>[existing,archived]),createWorktree:vi.fn(async()=>created)}
+  const worktrees = {resolveDefaultWorktree:vi.fn(async()=>({...created,branch:'main'})),syncProjectWorktrees:vi.fn(async()=>{}),listWorktrees:vi.fn(async()=>[existing,archived]),createWorktree:vi.fn(async()=>created)}
   const terminals = {createTerminal:vi.fn(()=>({id:'t1',projectId:'p1',worktreeId:'w4',status:'running'}))}
   await app.register(async scope => {
     await registerExternalTerminalRoutes(scope, terminals as never, {} as never, {} as never, {findById} as never)
@@ -44,11 +44,13 @@ describe('external workspace API',()=>{
       ['GET','/api/v1/projects/p1/worktrees'],
       ['GET','/api/v1/projects/p1/branches'],
       ['POST','/api/v1/projects/p1/worktrees'],
+      ['POST','/api/v1/projects/p1/terminals'],
       ['POST','/api/v1/projects/p1/worktrees/w1/terminals'],
     ] as const) {
       expect((await app.inject({method,url})).statusCode).toBe(401)
     }
     expect(worktrees.createWorktree).not.toHaveBeenCalled()
+    expect(worktrees.resolveDefaultWorktree).not.toHaveBeenCalled()
     expect(terminals.createTerminal).not.toHaveBeenCalled()
     vi.stubEnv('WORKTREEHUB_API_TOKEN','')
     expect((await app.inject({url:'/api/v1/projects',headers})).statusCode).toBe(503)
@@ -74,6 +76,21 @@ describe('external workspace API',()=>{
       expect((await create(payload)).statusCode).toBe(400)
     }
     expect(worktrees.createWorktree).toHaveBeenCalledTimes(2)
+  })
+  it('starts a terminal on the default branch without requiring a worktree or branch', async () => {
+    const {app,worktrees,terminals}=await fixture()
+    const create=(payload:object,projectId='p1')=>app.inject({method:'POST',url:'/api/v1/projects/'+projectId+'/terminals',headers,payload})
+    const result=await create({title:'New task',initialCommand:'claude "Fix cart"'})
+    expect(result.statusCode).toBe(201)
+    expect(result.json()).toMatchObject({id:'t1',worktreeId:'w4',branch:'main'})
+    expect(worktrees.resolveDefaultWorktree).toHaveBeenCalledWith('p1')
+    expect(terminals.createTerminal).toHaveBeenCalledWith('w4',{title:'New task',initialCommand:'claude "Fix cart"'})
+    expect((await create({branch:'feature'})).statusCode).toBe(400)
+    expect((await create({worktreeId:'w1'})).statusCode).toBe(400)
+    expect((await create({},'missing')).statusCode).toBe(404)
+    worktrees.resolveDefaultWorktree.mockRejectedValueOnce(new AppError('DEFAULT_BRANCH_NOT_FOUND','Default branch missing',409))
+    expect((await create({})).statusCode).toBe(409)
+    expect(terminals.createTerminal).toHaveBeenCalledTimes(1)
   })
   it('creates terminals in the requested project/worktree and rejects mismatches',async()=>{
     const {app,terminals}=await fixture()

@@ -87,6 +87,16 @@ export async function registerExternalWorkspaceRoutes(
     return reply.code(201).send(worktree)
   })
 
+  app.post<{ Params: { projectId: string } }>('/api/v1/projects/:projectId/terminals', async (request, reply) => {
+    parse(emptyQuery, request.query)
+    const { projectId } = request.params
+    requireProject(projectId)
+    const input = parse(createTerminalSchema, request.body ?? {})
+    const worktree = await worktrees.resolveDefaultWorktree(projectId)
+    const terminal = terminals.createTerminal(worktree.id, input)
+    return reply.code(201).send({ ...terminal, branch: worktree.branch })
+  })
+
   app.post<{ Params: { projectId: string; worktreeId: string } }>('/api/v1/projects/:projectId/worktrees/:worktreeId/terminals', async (request, reply) => {
     parse(emptyQuery, request.query)
     const { projectId, worktreeId } = request.params

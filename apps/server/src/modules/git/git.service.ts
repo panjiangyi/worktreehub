@@ -106,6 +106,18 @@ export async function createWorktree(input: {
   )
 }
 
+// Attach an existing local branch without forcing or creating a new branch.
+export async function attachBranchWorktree(repoPath: string, worktreePath: string, branch: string): Promise<void> {
+  await runGit(['worktree', 'add', '--', worktreePath, branch], repoPath)
+}
+
+export async function getCheckedOutBranch(worktreePath: string): Promise<string | null> {
+  const result = await runGitResult(['symbolic-ref', '--quiet', 'HEAD'], worktreePath)
+  return result.exitCode === 0 && result.stdout.startsWith('refs/heads/')
+    ? result.stdout.trim().slice('refs/heads/'.length)
+    : null
+}
+
 export async function removeWorktree(input: {
   repoPath: string
   path: string

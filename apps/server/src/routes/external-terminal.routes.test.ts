@@ -32,11 +32,17 @@ async function fixture() {
     Object.assign(session, input)
     return {...session, ...input}
   })
+  const deleteTerminal = vi.fn((id:string) => {
+    const index = sessions.findIndex(item => item.id === id)
+    if (index === -1) throw new AppError('TERMINAL_NOT_FOUND', 'Terminal not found')
+    sessions.splice(index, 1)
+  })
+  const hasRuntime = (id:string) => id === 'one' && sessions.some(item => item.id === id)
   const runtime = {screen,outputBuffer}
-  await registerExternalTerminalRoutes(app, {listTerminals:()=>sessions,writeToTerminal,renameTerminal} as never,
-    {has:(id:string)=>id==='one',get:(id:string)=>id==='one'?runtime:undefined} as never,
+  await registerExternalTerminalRoutes(app, {listTerminals:()=>sessions,writeToTerminal,renameTerminal,deleteTerminal} as never,
+    {has:hasRuntime,get:(id:string)=>hasRuntime(id)?runtime:undefined} as never,
     {findById:()=>({name:'Project'})} as never,{findById:()=>({branch:'main'})} as never)
-  return {app,writeToTerminal,screen,renameTerminal}
+  return {app,writeToTerminal,screen,renameTerminal,deleteTerminal}
 }
 afterEach(async () => {
   await Promise.all(apps.splice(0).map(app=>app.close()))
@@ -76,6 +82,25 @@ describe('external terminal API', () => {
     expect((await app.inject({method:'PATCH',url:'/api/v1/terminals/one',payload:{title:'unauthorized'}})).statusCode).toBe(401)
     expect(renameTerminal).toHaveBeenCalledTimes(1)
     expect(writeToTerminal).not.toHaveBeenCalled()
+  })
+  it('closes running or exited terminals with token auth and removes them from discovery', async () => {
+    const {app,deleteTerminal,writeToTerminal}=await fixture()
+    const close=(id:string)=>app.inject({method:'DELETE',url:'/api/v1/terminals/'+id,headers})
+    expect((await app.inject({method:'DELETE',url:'/api/v1/terminals/one'})).statusCode).toBe(401)
+    expect(deleteTerminal).not.toHaveBeenCalled()
+    const closed=await close('one')
+    expect(closed.statusCode).toBe(204)
+    expect(closed.body).toBe('')
+    expect(deleteTerminal).toHaveBeenCalledWith('one')
+    expect((await app.inject({url:'/api/v1/terminals',headers})).json()).toEqual({terminals:[]})
+    expect((await app.inject({url:'/api/v1/terminals/one/buffer',headers})).statusCode).toBe(404)
+    expect((await app.inject({method:'POST',url:'/api/v1/terminals/one/input',headers,payload:{text:'hello'}})).statusCode).toBe(404)
+    expect(writeToTerminal).not.toHaveBeenCalled()
+    expect((await close('two')).statusCode).toBe(204)
+    expect((await close('one')).statusCode).toBe(404)
+    expect((await close('missing')).statusCode).toBe(404)
+    vi.stubEnv('WORKTREEHUB_API_TOKEN','')
+    expect((await close('one')).statusCode).toBe(503)
   })
   it('supports raw ranges, tail, parsed screen and invalid ranges', async () => {
     const {app,screen}=await fixture()

@@ -114,3 +114,4 @@ For work directly on the default branch, use POST /projects/:projectId/terminals
 4. Use the returned worktree id to POST /projects/:projectId/worktrees/:worktreeId/terminals. Optionally start Claude Code or Codex using initialCommand, provided it is installed on the host.
 5. Use the returned terminal id with /terminals/:id/buffer, /input, /stream and PATCH /terminals/:id.
 6. Monitor setup and Agent readiness before sending commands. Use a trusted client; the bearer token grants shell access.
+7. When finished, DELETE /terminals/:id to close the terminal (204). This stops its PTY and removes the session without deleting the worktree or branch.

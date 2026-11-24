@@ -1,4 +1,5 @@
 import pty from 'node-pty'
+import headless from '@xterm/headless'
 import type { IPty } from 'node-pty'
 import type WebSocket from 'ws'
 import { buildShellLaunchConfig } from './compact-prompt.js'
@@ -41,6 +42,7 @@ export function buildInteractivePtyEnv(
   // interactive terminal it hosts. Presence alone disables colors in many
   // CLIs, even though this PTY advertises full color support.
   delete env.NO_COLOR
+  delete env.WORKTREEHUB_API_TOKEN
   return env
 }
 
@@ -78,11 +80,13 @@ export function createPtyManager() {
         terminalId: input.terminalId,
         pty: ptyProcess,
         outputBuffer,
+        screen: new headless.Terminal({ cols: input.cols, rows: input.rows, scrollback: 10000, allowProposedApi: true }),
         clients: new Set(),
         createdAt: new Date().toISOString(),
       }
 
       ptyProcess.onData((data) => {
+        if (sessions.get(input.terminalId) === runtime) runtime.screen.write(data)
         // Live clients get full raw data (DA responses are needed for the current xterm session)
         for (const client of runtime.clients) {
           sendWs(client, {
@@ -113,6 +117,7 @@ export function createPtyManager() {
     resize(terminalId: string, cols: number, rows: number): void {
       const runtime = sessions.get(terminalId)
       if (runtime) {
+        runtime.screen.resize(cols, rows)
         runtime.pty.resize(cols, rows)
       }
     },
@@ -120,8 +125,9 @@ export function createPtyManager() {
     kill(terminalId: string): void {
       const runtime = sessions.get(terminalId)
       if (runtime) {
-        runtime.pty.kill()
         sessions.delete(terminalId)
+        runtime.screen.dispose()
+        runtime.pty.kill()
       }
     },
 
@@ -149,7 +155,10 @@ export function createPtyManager() {
       const runtime = sessions.get(terminalId)
       if (runtime) {
         runtime.pty.onExit(({ exitCode }) => {
-          sessions.delete(terminalId)
+          if (sessions.get(terminalId) === runtime) {
+            sessions.delete(terminalId)
+            runtime.screen.dispose()
+          }
           callback(exitCode)
         })
       }

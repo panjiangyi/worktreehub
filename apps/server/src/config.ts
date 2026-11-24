@@ -1,7 +1,6 @@
 import path from 'node:path'
 import os from 'node:os'
-import fs from 'node:fs'
-import { config as loadDotEnv, parse as parseDotEnv } from 'dotenv'
+import { config as loadDotEnv } from 'dotenv'
 
 const repoRoot = path.resolve(import.meta.dirname, '../../../')
 loadDotEnv({ path: path.join(repoRoot, '.env') })
@@ -27,16 +26,6 @@ export type AppConfig = {
     rows: number
     scrollback: number
   }
-  weixin: {
-    enabled: boolean
-    baseUrl: string
-    apiKey: string
-    accountId: string
-    pollIntervalMs: number
-    mediaMaxBytes: number
-    mediaRetentionMs: number
-    approvalMode: 'ask' | 'auto'
-  }
 }
 
 function getDefaultDbPath(): string {
@@ -61,12 +50,6 @@ export function getConfig(): AppConfig {
     throw new Error('WORKTREEHUB_AUTH_USERNAME and WORKTREEHUB_AUTH_PASSWORD must be set in the root .env file')
   }
 
-  const weixinServiceEnvPath = process.env.WORKTREEHUB_WEIXIN_SERVICE_ENV?.trim()
-  const weixinServiceEnv = weixinServiceEnvPath
-    ? parseDotEnv(fs.readFileSync(weixinServiceEnvPath, 'utf8'))
-    : {}
-  const weixinPort = weixinServiceEnv.PORT || '47890'
-
   return {
     host: process.env.WORKTREEHUB_HOST ?? '127.0.0.1',
     port: Number(process.env.WORKTREEHUB_PORT ?? 3767),
@@ -87,16 +70,6 @@ export function getConfig(): AppConfig {
       cols: 120,
       rows: 30,
       scrollback: 10000,
-    },
-    weixin: {
-      enabled: process.env.WORKTREEHUB_WEIXIN_ENABLED === '1',
-      baseUrl: (process.env.WORKTREEHUB_WEIXIN_BASE_URL ?? `http://127.0.0.1:${weixinPort}`).replace(/\/$/, ''),
-      apiKey: process.env.WORKTREEHUB_WEIXIN_API_KEY ?? weixinServiceEnv.API_KEY ?? '',
-      accountId: process.env.WORKTREEHUB_WEIXIN_ACCOUNT_ID ?? '',
-      pollIntervalMs: Number(process.env.WORKTREEHUB_WEIXIN_POLL_INTERVAL_MS ?? 2000),
-      mediaMaxBytes: Number(process.env.WORKTREEHUB_WEIXIN_MEDIA_MAX_BYTES ?? 20 * 1024 * 1024),
-      mediaRetentionMs: Number(process.env.WORKTREEHUB_WEIXIN_MEDIA_RETENTION_MS ?? 7 * 24 * 60 * 60 * 1000),
-      approvalMode: process.env.WORKTREEHUB_WEIXIN_APPROVAL_MODE === 'auto' ? 'auto' : 'ask',
     },
   }
 }

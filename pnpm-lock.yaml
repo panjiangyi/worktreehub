@@ -25,6 +25,9 @@ importers:
       '@worktreehub/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@xterm/headless':
+        specifier: 5.5.0
+        version: 5.5.0
       better-sqlite3:
         specifier: ^13.0.3
         version: 13.0.3
@@ -148,40 +151,6 @@ importers:
         specifier: ^3.2.6
         version: 3.2.6(@types/node@22.19.19)(jiti@1.21.7)(tsx@4.22.4)
 
-  apps/weixin-bot:
-    dependencies:
-      '@hono/node-server':
-        specifier: ^1.13.8
-        version: 1.19.14(hono@4.12.31)
-      dotenv:
-        specifier: ^17.4.2
-        version: 17.4.2
-      hono:
-        specifier: ^4.7.4
-        version: 4.12.31
-      qrcode:
-        specifier: ^1.5.4
-        version: 1.5.4
-      zod:
-        specifier: ^3.23.8
-        version: 3.25.76
-    devDependencies:
-      '@types/node':
-        specifier: ^22.13.4
-        version: 22.19.19
-      '@types/qrcode':
-        specifier: ^1.5.6
-        version: 1.5.6
-      tsx:
-        specifier: ^4.19.3
-        version: 4.22.4
-      typescript:
-        specifier: ^5.8.3
-        version: 5.9.3
-      vitest:
-        specifier: ^3.1.4
-        version: 3.2.6(@types/node@22.19.19)(jiti@1.21.7)(tsx@4.22.4)
-
   packages/shared:
     devDependencies:
       typescript:
@@ -189,6 +158,9 @@ importers:
         version: 5.9.3
 
 packages:
+
+  '@xterm/headless@5.5.0':
+    resolution: {tarball: https://registry.npmjs.org/@xterm/headless/-/headless-5.5.0.tgz}
 
   '@alloc/quick-lru@5.2.0':
     resolution: {integrity: sha512-UrcABB+4bUrFABwbluTIBErXwvbsU/V7TZWfmbgJfbkwiBuziS9gxdODUyuiecfdGQ85jglMW6juS3+z5TsKLw==}
@@ -2359,6 +2331,8 @@ packages:
         optional: true
 
 snapshots:
+
+  '@xterm/headless@5.5.0': {}
 
   '@alloc/quick-lru@5.2.0': {}
 
